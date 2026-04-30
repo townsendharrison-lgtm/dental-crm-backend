@@ -51,23 +51,10 @@ router.post('/invite', async (req: AuthRequest, res: Response) => {
 
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
 
-    // Use Supabase built-in inviteUserByEmail
-    // This creates the user in auth.users with a pending invite and sends them the invite email
-    const { data: inviteData, error: inviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
-      data: {
-        role,
-        name: '', // User will set their name when completing the invitation
-        invited_by_name: inviter?.name || 'Admin',
-      },
-      redirectTo: `${frontendUrl}/#/complete-invitation`,
-    });
-
-    if (inviteError) {
-      return res.status(400).json({ error: inviteError.message });
-    }
-
-    // Also generate a shareable link that admin can copy manually
-    const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
+    // 1. Generate a shareable link FIRST (admin can copy this)
+    // We do this before inviteUserByEmail so the email token (generated second) stays valid.
+    let invitationLink = '';
+    const { data: linkData } = await supabaseAdmin.auth.admin.generateLink({
       type: 'invite',
       email,
       options: {
@@ -80,9 +67,22 @@ router.post('/invite', async (req: AuthRequest, res: Response) => {
       },
     });
 
-    let invitationLink = '';
     if (linkData?.properties?.action_link) {
       invitationLink = linkData.properties.action_link;
+    }
+
+    // 2. Send the invite email LAST — its token will be the valid one
+    const { data: inviteData, error: inviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
+      data: {
+        role,
+        name: '',
+        invited_by_name: inviter?.name || 'Admin',
+      },
+      redirectTo: `${frontendUrl}/#/complete-invitation`,
+    });
+
+    if (inviteError) {
+      return res.status(400).json({ error: inviteError.message });
     }
 
     // Track the invitation in our table for admin visibility
