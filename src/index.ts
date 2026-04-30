@@ -8,6 +8,7 @@ import { userRouter } from './routes/users.js';
 import { adminRouter } from './routes/admin.js';
 import { publicRouter } from './routes/public.js';
 import { notificationRouter } from './routes/notifications.js';
+import { leadsRouter } from './routes/leads.js';
 import { errorHandler } from './middleware/errorHandler.js';
 
 const app = express();
@@ -48,6 +49,7 @@ app.use('/api/users', userRouter);
 app.use('/api/admin', adminRouter);
 app.use('/api/public', publicRouter);
 app.use('/api/notifications', notificationRouter);
+app.use('/api/leads', leadsRouter);
 
 // Health check
 app.get('/health', (req, res) => {

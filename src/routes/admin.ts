@@ -259,6 +259,36 @@ router.put('/users/:id/role', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// Update user details (e.g. goals)
+router.put('/users/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { weeklyLeadGoal, monthlyLeadGoal, name, avatar } = req.body;
+
+    const updates: any = { updated_at: new Date().toISOString() };
+    if (weeklyLeadGoal !== undefined) updates.weekly_lead_goal = weeklyLeadGoal;
+    if (monthlyLeadGoal !== undefined) updates.monthly_lead_goal = monthlyLeadGoal;
+    if (name !== undefined) updates.name = name;
+    if (avatar !== undefined) updates.avatar = avatar;
+
+    const { data: user, error } = await supabaseAdmin
+      .from('users')
+      .update(updates)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    res.json(user);
+  } catch (error) {
+    console.error('Update user error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Delete user
 router.delete('/users/:id', async (req: AuthRequest, res: Response) => {
   try {

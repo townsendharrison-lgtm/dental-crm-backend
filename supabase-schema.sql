@@ -243,3 +243,88 @@ CREATE POLICY "Service role manages fcm_tokens"
 -- Trigger for updated_at on fcm_tokens
 CREATE TRIGGER update_fcm_tokens_updated_at BEFORE UPDATE ON public.fcm_tokens
   FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+-- =============================================
+-- LEADS TABLE (For Setter Dashboard)
+-- =============================================
+CREATE TABLE IF NOT EXISTS public.leads (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  phone TEXT,
+  email TEXT,
+  source TEXT DEFAULT 'Other',
+  notes TEXT,
+  admin_notes TEXT,
+  contacted BOOLEAN DEFAULT FALSE,
+  is_paid BOOLEAN DEFAULT FALSE,
+  showed_up BOOLEAN DEFAULT FALSE,
+  purchased_items TEXT[] DEFAULT '{}',
+  purchase_total NUMERIC DEFAULT 0,
+  setter_id UUID REFERENCES public.users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_leads_setter_id ON public.leads(setter_id);
+CREATE INDEX IF NOT EXISTS idx_leads_source ON public.leads(source);
+
+ALTER TABLE public.leads ENABLE ROW LEVEL SECURITY;
+
+-- Admins can view all leads
+CREATE POLICY "Admins can view all leads"
+  ON public.leads FOR SELECT
+  USING (
+    EXISTS (
+      SELECT 1 FROM public.users
+      WHERE id = auth.uid() AND role = 'ADMIN'
+    )
+  );
+
+-- Admins can update all leads
+CREATE POLICY "Admins can update all leads"
+  ON public.leads FOR UPDATE
+  USING (
+    EXISTS (
+      SELECT 1 FROM public.users
+      WHERE id = auth.uid() AND role = 'ADMIN'
+    )
+  );
+
+-- Admins can insert leads
+CREATE POLICY "Admins can insert leads"
+  ON public.leads FOR INSERT
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM public.users
+      WHERE id = auth.uid() AND role = 'ADMIN'
+    )
+  );
+
+-- Admins can delete leads
+CREATE POLICY "Admins can delete leads"
+  ON public.leads FOR DELETE
+  USING (
+    EXISTS (
+      SELECT 1 FROM public.users
+      WHERE id = auth.uid() AND role = 'ADMIN'
+    )
+  );
+
+-- Setters can view their own leads
+CREATE POLICY "Setters can view their own leads"
+  ON public.leads FOR SELECT
+  USING (auth.uid() = setter_id);
+
+-- Setters can insert their own leads
+CREATE POLICY "Setters can insert their own leads"
+  ON public.leads FOR INSERT
+  WITH CHECK (auth.uid() = setter_id);
+
+-- Setters can update their own leads
+CREATE POLICY "Setters can update their own leads"
+  ON public.leads FOR UPDATE
+  USING (auth.uid() = setter_id);
+
+-- Trigger for updated_at on leads
+CREATE TRIGGER update_leads_updated_at BEFORE UPDATE ON public.leads
+  FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
