@@ -9,7 +9,9 @@ import { adminRouter } from './routes/admin.js';
 import { publicRouter } from './routes/public.js';
 import { notificationRouter } from './routes/notifications.js';
 import { leadsRouter } from './routes/leads.js';
+import { lorRouter } from './routes/lor.js';
 import { errorHandler } from './middleware/errorHandler.js';
+import { startReminderCron } from './services/lorReminderCron.js';
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -50,6 +52,7 @@ app.use('/api/admin', adminRouter);
 app.use('/api/public', publicRouter);
 app.use('/api/notifications', notificationRouter);
 app.use('/api/leads', leadsRouter);
+app.use('/api/lor', lorRouter);
 
 // Health check
 app.get('/health', (req, res) => {
@@ -62,4 +65,6 @@ app.use(errorHandler);
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
+  // Start automated LOR reminder cron
+  startReminderCron();
 });

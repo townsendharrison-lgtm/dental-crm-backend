@@ -257,7 +257,7 @@ CREATE TABLE IF NOT EXISTS public.leads (
   admin_notes TEXT,
   contacted BOOLEAN DEFAULT FALSE,
   is_paid BOOLEAN DEFAULT FALSE,
-  showed_up BOOLEAN DEFAULT FALSE,
+  showed_up BOOLEAN DEFAULT NULL,
   purchased_items TEXT[] DEFAULT '{}',
   purchase_total NUMERIC DEFAULT 0,
   setter_id UUID REFERENCES public.users(id) ON DELETE SET NULL,
