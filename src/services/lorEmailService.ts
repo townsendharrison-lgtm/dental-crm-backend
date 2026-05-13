@@ -71,19 +71,12 @@ function buildEmailHtml(options: {
   const { config, title, bodyHtml, ctaText, ctaUrl, footerNote, urgencyColor, extraButtons } = options;
   const primaryColor = config.design.primaryColor || '#6366f1';
   const accentColor = urgencyColor || primaryColor;
-  const logoUrl = config.design.logoUrl;
-  const bannerUrl = config.design.bannerUrl;
 
-  const logoHtml = logoUrl
-    ? `<img src="${logoUrl}" alt="Dental School Guide" style="height:40px;max-width:180px;object-fit:contain;margin-bottom:16px;" />`
-    : `<div style="font-size:20px;font-weight:800;color:#1e293b;margin-bottom:16px;letter-spacing:-0.5px;">Dental School Guide</div>`;
-
-  const bannerHtml = bannerUrl
-    ? `<img src="${bannerUrl}" alt="" style="width:100%;max-height:200px;object-fit:cover;border-radius:12px;margin-bottom:24px;" />`
-    : '';
+  // DSG Logo — always use the official one
+  const logoUrl = config.design.logoUrl || 'https://images.squarespace-cdn.com/content/64d0277a0640507c114633ad/b8543df7-ec9e-4d64-912e-e80bb44c8757/Untitled+design-3.png?content-type=image%2Fpng';
 
   const extraButtonsHtml = (extraButtons || []).map(btn =>
-    `<a href="${btn.url}" target="_blank" style="display:inline-block;padding:12px 28px;background-color:#f1f5f9;color:#334155;font-weight:700;font-size:14px;text-decoration:none;border-radius:10px;margin-right:8px;margin-top:8px;border:1px solid #e2e8f0;">${btn.text}</a>`
+    `<a href="${btn.url}" target="_blank" style="display:inline-block;padding:12px 28px;background-color:#1e293b;color:#94a3b8;font-weight:700;font-size:13px;text-decoration:none;border-radius:12px;margin-right:8px;margin-top:8px;border:1px solid #334155;">${btn.text}</a>`
   ).join('');
 
   return `<!DOCTYPE html>
@@ -93,43 +86,52 @@ function buildEmailHtml(options: {
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>${title}</title>
 </head>
-<body style="margin:0;padding:0;background-color:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
+<body style="margin:0;padding:0;background-color:#0f172a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
   <div style="max-width:600px;margin:0 auto;padding:40px 20px;">
-    <!-- Top accent bar -->
-    <div style="height:4px;background:${accentColor};border-radius:4px 4px 0 0;"></div>
     
     <!-- Main card -->
-    <div style="background:#ffffff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 16px 16px;padding:40px 32px;box-shadow:0 4px 6px -1px rgba(0,0,0,0.05);">
-      ${logoHtml}
-      ${bannerHtml}
+    <div style="background:#0f172a;border:1px solid #1e293b;border-radius:24px;overflow:hidden;">
       
-      <h1 style="font-size:22px;font-weight:800;color:#0f172a;margin:0 0 24px 0;line-height:1.3;">${title}</h1>
+      <!-- Header with gradient -->
+      <div style="background:linear-gradient(135deg, ${accentColor} 0%, ${accentColor}cc 50%, ${accentColor}99 100%);padding:40px 36px;text-align:center;">
+        <img src="${logoUrl}" alt="Dental School Guide" style="height:36px;max-width:180px;object-fit:contain;margin-bottom:20px;" />
+        <h1 style="font-size:24px;font-weight:800;color:#ffffff;margin:0;line-height:1.3;letter-spacing:-0.5px;">${title}</h1>
+      </div>
       
-      <div style="font-size:15px;color:#475569;line-height:1.7;margin-bottom:32px;">
-        ${bodyHtml}
+      <!-- Body content -->
+      <div style="padding:40px 36px;">
+        <div style="font-size:15px;color:#94a3b8;line-height:1.8;margin-bottom:32px;">
+          ${bodyHtml}
+        </div>
+
+        <!-- Requirements box -->
+        ${config.content.requirements ? `
+        <div style="background:#1e293b;border:1px solid #334155;border-radius:16px;padding:24px 28px;margin-bottom:32px;">
+          <div style="font-size:10px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:2px;margin-bottom:12px;">📋 Letter Requirements</div>
+          <div style="font-size:14px;color:#cbd5e1;line-height:1.8;white-space:pre-wrap;">${config.content.requirements}</div>
+        </div>` : ''}
+
+        <!-- CTA Button -->
+        <div style="text-align:center;margin:36px 0 24px;">
+          <a href="${ctaUrl}" target="_blank" style="display:inline-block;padding:16px 48px;background:linear-gradient(135deg, ${accentColor}, ${accentColor}dd);color:#ffffff;font-weight:800;font-size:16px;text-decoration:none;border-radius:16px;box-shadow:0 8px 24px ${accentColor}40;letter-spacing:0.3px;">${ctaText}</a>
+        </div>
+
+        <!-- Extra buttons (PDF links etc) -->
+        ${extraButtonsHtml ? `<div style="text-align:center;margin-bottom:24px;">${extraButtonsHtml}</div>` : ''}
+
+        <!-- Access code display -->
+        ${footerNote ? `
+        <div style="background:#1e293b;border:1px solid #334155;border-radius:12px;padding:16px 20px;text-align:center;margin-top:24px;">
+          <div style="font-size:12px;color:#64748b;line-height:1.6;">${footerNote}</div>
+        </div>` : ''}
       </div>
 
-      <!-- Requirements box -->
-      ${config.content.requirements ? `
-      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:20px 24px;margin-bottom:32px;">
-        <div style="font-size:11px;font-weight:800;color:#64748b;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:12px;">Letter Requirements</div>
-        <div style="font-size:14px;color:#475569;line-height:1.8;white-space:pre-wrap;">${config.content.requirements}</div>
-      </div>` : ''}
-
-      <!-- CTA Button -->
-      <div style="text-align:center;margin-bottom:24px;">
-        <a href="${ctaUrl}" target="_blank" style="display:inline-block;padding:16px 40px;background-color:${accentColor};color:#ffffff;font-weight:800;font-size:15px;text-decoration:none;border-radius:12px;box-shadow:0 4px 14px ${accentColor}33;">${ctaText}</a>
+      <!-- Footer -->
+      <div style="padding:24px 36px;border-top:1px solid #1e293b;text-align:center;">
+        <p style="font-size:11px;color:#334155;margin:0 0 4px;font-weight:600;text-transform:uppercase;letter-spacing:1px;">Powered by</p>
+        <p style="font-size:12px;color:#475569;margin:0 0 8px;font-weight:700;">Dental School Guide</p>
+        <p style="font-size:11px;color:#334155;margin:0;">This is an automated message. Please do not reply directly.</p>
       </div>
-
-      ${extraButtonsHtml ? `<div style="text-align:center;margin-bottom:24px;">${extraButtonsHtml}</div>` : ''}
-
-      ${footerNote ? `<div style="font-size:12px;color:#94a3b8;text-align:center;margin-top:24px;padding-top:24px;border-top:1px solid #f1f5f9;">${footerNote}</div>` : ''}
-    </div>
-
-    <!-- Footer -->
-    <div style="text-align:center;padding:24px 0;">
-      <p style="font-size:12px;color:#94a3b8;margin:0 0 4px 0;">Sent by <strong style="color:#64748b;">Dental School Guide</strong></p>
-      <p style="font-size:11px;color:#cbd5e1;margin:0;">This is an automated message. Please do not reply directly.</p>
     </div>
   </div>
 </body>
@@ -306,8 +308,40 @@ export async function sendTestEmail(toEmail: string, config: LOREmailConfig): Pr
     writer_name: 'Dr. Miller',
     writer_email: toEmail,
     due_date: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
-    access_code: 'LOR-TEST-DM-001',
+    access_code: 'LOR-PREVIEW-0000',
   };
 
-  return sendInitialEmail(mockRequest, config);
+  const subject = interpolateVariables(config.content.subject, mockRequest);
+  const bodyText = interpolateVariables(config.content.body, mockRequest);
+
+  // Add a test preview banner to the body
+  const previewBanner = `<div style="background:#f59e0b;color:#78350f;padding:12px 20px;border-radius:12px;margin-bottom:24px;text-align:center;font-size:13px;font-weight:800;">⚠️ TEST PREVIEW — This is a design preview only. The upload button and access code below are not functional.</div>`;
+  const bodyHtml = previewBanner + bodyText.replace(/\n/g, '<br/>');
+
+  const html = buildEmailHtml({
+    config,
+    title: subject,
+    bodyHtml,
+    ctaText: '📤 Upload Your Letter (Preview Only)',
+    ctaUrl: '#',
+    footerNote: `Due Date: <strong>${formatDate(mockRequest.due_date)}</strong> · Access Code: <strong>${mockRequest.access_code}</strong>`,
+  });
+
+  try {
+    const { error } = await resend.emails.send({
+      from: FROM_EMAIL,
+      to: toEmail,
+      subject: `[TEST] ${subject}`,
+      html,
+    });
+    if (error) {
+      console.error('❌ Resend error (test):', error);
+      return false;
+    }
+    console.log(`📧 Test email sent to ${toEmail}`);
+    return true;
+  } catch (err) {
+    console.error('❌ Failed to send test email:', err);
+    return false;
+  }
 }
