@@ -422,6 +422,40 @@ router.post('/upload/:accessCode', upload.single('file'), async (req: Request, r
     // Notify admins
     await notifyAdminsLORUploaded(lorReq.writer_name, lorReq.student_name, lorReq.id);
 
+    // Send upload confirmation email to student
+    try {
+      const trackingToken = encryptTrackingToken(lorReq.student_email.toLowerCase().trim());
+      const trackingUrl = `${process.env.LOR_GUEST_TRACK_URL || process.env.FRONTEND_URL || 'http://localhost:3000'}/#/guest-letter-track?token=${encodeURIComponent(trackingToken)}`;
+      
+      const { Resend } = await import('resend');
+      const resend = new Resend(process.env.RESEND_API_KEY);
+      await resend.emails.send({
+        from: process.env.LOR_FROM_EMAIL || 'Dental School Guide <no-reply@dentalschoolguide.com>',
+        to: lorReq.student_email,
+        subject: 'Your Letter has been Uploaded!',
+        html: `
+          <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; background-color: #0f172a; color: #f8fafc; padding: 40px; border-radius: 16px;">
+            <h2 style="color: #fff; margin-top: 0;">Upload Successful</h2>
+            <p style="color: #cbd5e1; font-size: 16px; line-height: 1.6;">
+              Hi ${lorReq.student_name},<br><br>
+              <strong>${lorReq.writer_name}</strong> has successfully uploaded your letter of recommendation!
+            </p>
+            <p style="color: #cbd5e1; font-size: 16px; line-height: 1.6;">
+              The letter is now pending review by our team.
+            </p>
+            <div style="margin: 32px 0;">
+              <a href="${trackingUrl}" style="background-color: #4f46e5; color: white; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block;">Track Review Status</a>
+            </div>
+            <p style="color: #64748b; font-size: 14px; margin-top: 40px; border-top: 1px solid #1e293b; padding-top: 20px;">
+              Powered by Dental School Guide
+            </p>
+          </div>
+        `
+      });
+    } catch (emailErr) {
+      console.error('Failed to send upload email to student:', emailErr);
+    }
+
     res.json({ success: true, message: 'Letter uploaded successfully' });
   } catch (err) {
     console.error('LOR upload error:', err);
@@ -588,6 +622,34 @@ router.patch('/requests/:id/status', authenticate, authorize('ADMIN'), async (re
             recipient_email: updated.writer_email,
           });
         }
+      }
+    } else if (status === 'REVIEWED' && updated) {
+      // Send acceptance email to writer
+      try {
+        const { Resend } = await import('resend');
+        const resend = new Resend(process.env.RESEND_API_KEY);
+        await resend.emails.send({
+          from: process.env.LOR_FROM_EMAIL || 'Dental School Guide <no-reply@dentalschoolguide.com>',
+          to: updated.writer_email,
+          subject: `Letter Accepted: ${updated.student_name}`,
+          html: `
+            <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; background-color: #0f172a; color: #f8fafc; padding: 40px; border-radius: 16px;">
+              <h2 style="color: #fff; margin-top: 0;">Letter Accepted</h2>
+              <p style="color: #cbd5e1; font-size: 16px; line-height: 1.6;">
+                Hi ${updated.writer_name},<br><br>
+                Thank you for supporting <strong>${updated.student_name}</strong>'s application. Your letter has been reviewed and accepted by our team!
+              </p>
+              <p style="color: #cbd5e1; font-size: 16px; line-height: 1.6;">
+                No further action is required on your part. We appreciate your time and support.
+              </p>
+              <p style="color: #64748b; font-size: 14px; margin-top: 40px; border-top: 1px solid #1e293b; padding-top: 20px;">
+                Powered by Dental School Guide
+              </p>
+            </div>
+          `
+        });
+      } catch (emailErr) {
+        console.error('Failed to send acceptance email to writer:', emailErr);
       }
     }
 
