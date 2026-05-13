@@ -680,11 +680,14 @@ router.get('/documents/:requestId', authenticate, authorize('ADMIN'), async (req
       return res.status(404).json({ error: 'Document not found' });
     }
 
+    const forceDownload = req.query.download === 'true';
+
     // Create signed URL (valid for 1 hour)
+    const options = forceDownload ? { download: true } : {};
     const { data: signedUrl, error: signError } = await supabaseAdmin
       .storage
       .from('lor-documents')
-      .createSignedUrl(lorReq.document_url, 3600, { download: true });
+      .createSignedUrl(lorReq.document_url, 3600, options);
 
     if (signError) {
       return res.status(500).json({ error: 'Failed to generate download URL' });
