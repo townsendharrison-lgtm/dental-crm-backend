@@ -5,6 +5,7 @@ import { messaging } from '../config/firebase.js';
 import { sendInitialEmail, sendDeclineReuploadEmail, sendTestEmail } from '../services/lorEmailService.js';
 import multer from 'multer';
 import { v4 as uuidv4 } from 'uuid';
+import crypto from 'crypto';
 
 const router = Router();
 
@@ -22,10 +23,39 @@ const upload = multer({
 });
 
 function generateAccessCode(studentName: string, writerName: string): string {
-  const s = studentName.substring(0, 2).toUpperCase().replace(/[^A-Z]/g, 'X');
-  const w = writerName.substring(0, 2).toUpperCase().replace(/[^A-Z]/g, 'X');
-  const rand = Math.floor(Math.random() * 9000) + 1000;
-  return `LOR-${s}-${w}-${rand}`;
+  const s = studentName.substring(0, 2).toUpperCase().replace(/[^A-Z]/g, 'X').padEnd(2, 'X');
+  const w = writerName.substring(0, 2).toUpperCase().replace(/[^A-Z]/g, 'X').padEnd(2, 'X');
+  const rand1 = Math.random().toString(36).substring(2, 6).toUpperCase().padStart(4, '0');
+  const rand2 = Math.random().toString(36).substring(2, 6).toUpperCase().padStart(4, '0');
+  return `LOR-${s}${w}-${rand1}-${rand2}`;
+}
+
+// ─── Tracking Token Utils ────────────────────────────────────────────
+const ENCRYPTION_KEY = process.env.JWT_SECRET || 'fallback_secret_key_needs_32_bytes_length!'.substring(0, 32);
+const IV_LENGTH = 16;
+
+function encryptTrackingToken(email: string): string {
+  const key = Buffer.from(ENCRYPTION_KEY.padEnd(32, '0').substring(0, 32));
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
+  let encrypted = cipher.update(email);
+  encrypted = Buffer.concat([encrypted, cipher.final()]);
+  return iv.toString('hex') + ':' + encrypted.toString('hex');
+}
+
+function decryptTrackingToken(token: string): string | null {
+  try {
+    const textParts = token.split(':');
+    const iv = Buffer.from(textParts.shift()!, 'hex');
+    const encryptedText = Buffer.from(textParts.join(':'), 'hex');
+    const key = Buffer.from(ENCRYPTION_KEY.padEnd(32, '0').substring(0, 32));
+    const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+    let decrypted = decipher.update(encryptedText);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    return decrypted.toString();
+  } catch (err) {
+    return null;
+  }
 }
 
 // ─── Helper: send push notification to admins ────────────────────
@@ -200,9 +230,45 @@ router.post('/requests/guest', async (req: Request, res: Response) => {
       }
     }
 
+    // Send tracking email to STUDENT
+    try {
+      const trackingToken = encryptTrackingToken(studentEmail.toLowerCase().trim());
+      const trackingUrl = `${process.env.LOR_GUEST_TRACK_URL || process.env.FRONTEND_URL || 'http://localhost:3000'}/#/guest-letter-track?token=${encodeURIComponent(trackingToken)}`;
+      
+      const { Resend } = await import('resend');
+      const resend = new Resend(process.env.RESEND_API_KEY);
+      await resend.emails.send({
+        from: process.env.LOR_FROM_EMAIL || 'Dental School Guide <no-reply@dentalschoolguide.com>',
+        to: studentEmail,
+        subject: 'Track Your Letter of Recommendation',
+        html: `
+          <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; background-color: #0f172a; color: #f8fafc; padding: 40px; border-radius: 16px;">
+            <h2 style="color: #fff; margin-top: 0;">Track Your Letter Request</h2>
+            <p style="color: #cbd5e1; font-size: 16px; line-height: 1.6;">
+              Hi ${studentName},<br><br>
+              Your letter of recommendation request to <strong>${writerName}</strong> has been sent successfully!
+            </p>
+            <p style="color: #cbd5e1; font-size: 16px; line-height: 1.6;">
+              You can track the status of this request (and any others you submit) at any time using your secure tracking link below.
+            </p>
+            <div style="margin: 32px 0;">
+              <a href="${trackingUrl}" style="background-color: #4f46e5; color: #ffffff; padding: 16px 24px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">
+                Track My Letter Status
+              </a>
+            </div>
+            <p style="color: #64748b; font-size: 14px;">
+              Please save this email. This link is unique to you and securely tied to your email address.
+            </p>
+          </div>
+        `
+      });
+    } catch (emailErr) {
+      console.error('Failed to send tracking email to student:', emailErr);
+    }
+
     res.status(201).json({
       request: lorReq,
-      trackingUrl: `${process.env.LOR_GUEST_TRACK_URL || process.env.FRONTEND_URL || 'http://localhost:3000'}?email=${encodeURIComponent(studentEmail)}`,
+      trackingUrl: `${process.env.LOR_GUEST_TRACK_URL || process.env.FRONTEND_URL || 'http://localhost:3000'}/#/guest-letter-track?token=${encodeURIComponent(encryptTrackingToken(studentEmail.toLowerCase().trim()))}`,
     });
   } catch (err) {
     console.error('Guest LOR request error:', err);
@@ -210,28 +276,25 @@ router.post('/requests/guest', async (req: Request, res: Response) => {
   }
 });
 
-// ─── GET /api/lor/requests/track — Guest tracks by email or name ──
+// ─── GET /api/lor/requests/track — Guest tracks by secure token ──
 router.get('/requests/track', async (req: Request, res: Response) => {
   try {
-    const email = req.query.email as string;
-    const name = req.query.name as string;
+    const token = req.query.token as string;
 
-    if (!email && !name) {
-      return res.status(400).json({ error: 'Email or name is required' });
+    if (!token) {
+      return res.status(401).json({ error: 'Tracking token is missing' });
     }
 
-    let query = supabaseAdmin
+    const email = decryptTrackingToken(token);
+    if (!email) {
+      return res.status(401).json({ error: 'Invalid or expired tracking token' });
+    }
+
+    const { data, error } = await supabaseAdmin
       .from('lor_requests')
       .select('id, student_name, writer_name, writer_email, due_date, status, requested_at, uploaded_at, reviewed_at, decline_reason, access_code')
+      .eq('student_email', email)
       .order('requested_at', { ascending: false });
-
-    if (email) {
-      query = query.eq('student_email', email.toLowerCase().trim());
-    } else if (name) {
-      query = query.ilike('student_name', `%${name.trim()}%`);
-    }
-
-    const { data, error } = await query;
 
     if (error) {
       return res.status(400).json({ error: error.message });
@@ -240,6 +303,30 @@ router.get('/requests/track', async (req: Request, res: Response) => {
     res.json({ requests: data || [] });
   } catch (err) {
     console.error('Guest LOR track error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ─── GET /api/lor/requests/:id/tracking-link — Admin retrieves link ──
+router.get('/requests/:id/tracking-link', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { data, error } = await supabaseAdmin
+      .from('lor_requests')
+      .select('student_email')
+      .eq('id', id)
+      .single();
+
+    if (error || !data) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
+
+    const token = encryptTrackingToken(data.student_email.toLowerCase().trim());
+    const trackingUrl = `${process.env.LOR_GUEST_TRACK_URL || process.env.FRONTEND_URL || 'http://localhost:3000'}/#/guest-letter-track?token=${encodeURIComponent(token)}`;
+
+    res.json({ trackingUrl });
+  } catch (err) {
+    console.error('Get tracking link error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -347,16 +434,23 @@ router.post('/upload/:accessCode', upload.single('file'), async (req: Request, r
 //  AUTHENTICATED ROUTES
 // ════════════════════════════════════════════════════════════════
 
-// ─── GET /api/lor/requests — Admin gets all requests ──────────
-router.get('/requests', authenticate, authorize('ADMIN'), async (req: AuthRequest, res: Response) => {
+// ─── GET /api/lor/requests — Admin/Student gets requests ──────────
+router.get('/requests', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     const status = req.query.status as string;
     const search = req.query.search as string;
+    const userId = req.user!.id;
+    const userRole = req.user!.role;
 
     let query = supabaseAdmin
       .from('lor_requests')
       .select('*')
       .order('requested_at', { ascending: false });
+
+    // Students can only see their own requests
+    if (userRole === 'STUDENT') {
+      query = query.eq('student_id', userId);
+    }
 
     if (status && status !== 'ALL') {
       query = query.eq('status', status);
@@ -528,7 +622,7 @@ router.get('/documents/:requestId', authenticate, authorize('ADMIN'), async (req
     const { data: signedUrl, error: signError } = await supabaseAdmin
       .storage
       .from('lor-documents')
-      .createSignedUrl(lorReq.document_url, 3600);
+      .createSignedUrl(lorReq.document_url, 3600, { download: true });
 
     if (signError) {
       return res.status(500).json({ error: 'Failed to generate download URL' });
