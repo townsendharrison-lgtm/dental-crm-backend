@@ -10,6 +10,7 @@ import { publicRouter } from './routes/public.js';
 import { notificationRouter } from './routes/notifications.js';
 import { leadsRouter } from './routes/leads.js';
 import { lorRouter } from './routes/lor.js';
+import { dentistsRouter } from './routes/dentists.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { startReminderCron } from './services/lorReminderCron.js';
 
@@ -53,6 +54,7 @@ app.use('/api/public', publicRouter);
 app.use('/api/notifications', notificationRouter);
 app.use('/api/leads', leadsRouter);
 app.use('/api/lor', lorRouter);
+app.use('/api/dentists', dentistsRouter);
 
 // Health check
 app.get('/health', (req, res) => {
