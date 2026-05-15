@@ -15,6 +15,7 @@ import { errorHandler } from './middleware/errorHandler.js';
 import { startReminderCron } from './services/lorReminderCron.js';
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 5001;
 
 // Rate limiting for auth routes
