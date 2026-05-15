@@ -40,7 +40,7 @@ dentistsRouter.get('/', async (req, res) => {
       try {
         const r = await fetch(url);
         if (!r.ok) return [];
-        const data = await r.json();
+        const data: any = await r.json();
         return data.results || [];
       } catch (err) {
         console.error("NPI fetch error:", err);
