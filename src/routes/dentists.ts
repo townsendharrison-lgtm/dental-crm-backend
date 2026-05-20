@@ -24,7 +24,7 @@ async function geocodeAddress(street: string, city: string, state: string, zip: 
         headers: { 'User-Agent': 'DentalSchoolGuideCRM/1.0' },
       });
       if (!r.ok) continue;
-      const data: any[] = await r.json();
+      const data: any = await r.json();
       if (data && data.length > 0) {
         const result = { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
         geocodeCache.set(cacheKey, result);
