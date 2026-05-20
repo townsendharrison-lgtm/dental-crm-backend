@@ -339,4 +339,28 @@ router.post('/new-lead', authorize('SETTER', 'ADMIN'), async (req: AuthRequest, 
   }
 });
 
+// ─── DELETE all notifications for the current user ────────────────────
+router.delete('/clear-all', async (req: any, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ error: 'Not authenticated' });
+
+    const { error } = await supabaseAdmin
+      .from('notifications')
+      .delete()
+      .eq('user_id', userId);
+
+    if (error) {
+      console.error('Clear all notifications error:', error.message);
+      return res.status(500).json({ error: error.message });
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Clear all notifications error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 export { router as notificationRouter };
+

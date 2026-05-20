@@ -2,6 +2,65 @@ import { Router } from 'express';
 
 export const dentistsRouter = Router();
 
+// ─── Geocoding cache (in-memory, persists for server lifetime) ──────
+const geocodeCache = new Map<string, { lat: number; lng: number } | null>();
+
+async function geocodeAddress(street: string, city: string, state: string, zip: string): Promise<{ lat: number; lng: number } | null> {
+  // Build a cache key from the address components
+  const cacheKey = `${street}|${city}|${state}|${zip}`.toLowerCase();
+  if (geocodeCache.has(cacheKey)) return geocodeCache.get(cacheKey)!;
+
+  // Try progressively less specific queries for better hit rate
+  const queries = [
+    `${street}, ${city}, ${state} ${zip}`,
+    `${city}, ${state} ${zip}`,
+    `${zip}, ${state}`,
+  ];
+
+  for (const q of queries) {
+    try {
+      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1&countrycodes=us`;
+      const r = await fetch(url, {
+        headers: { 'User-Agent': 'DentalSchoolGuideCRM/1.0' },
+      });
+      if (!r.ok) continue;
+      const data: any[] = await r.json();
+      if (data && data.length > 0) {
+        const result = { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+        geocodeCache.set(cacheKey, result);
+        return result;
+      }
+    } catch (err) {
+      // Continue to next query
+    }
+  }
+
+  geocodeCache.set(cacheKey, null);
+  return null;
+}
+
+// Rate-limited batch geocoding — 1 request per second for Nominatim compliance
+async function batchGeocode(rows: any[], maxCount: number = 50): Promise<void> {
+  const toGeocode = rows.slice(0, maxCount).filter(r => r.address || r.city || r.zip);
+  let successCount = 0;
+  for (let i = 0; i < toGeocode.length; i++) {
+    const r = toGeocode[i];
+    const result = await geocodeAddress(r.address, r.city, r.state, r.zip);
+    if (result) {
+      r.latitude = result.lat;
+      r.longitude = result.lng;
+      successCount++;
+    } else {
+      console.warn(`Geocoding failed for: ${r.address}, ${r.city}, ${r.state} ${r.zip}`);
+    }
+    // Rate limit: wait 1.1s between requests (Nominatim requires max 1 req/s)
+    if (i < toGeocode.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 1100));
+    }
+  }
+  console.log(`Geocoded ${successCount}/${toGeocode.length} addresses`);
+}
+
 dentistsRouter.get('/', async (req, res) => {
   try {
     const { zip, city, state, name } = req.query;
@@ -84,13 +143,6 @@ dentistsRouter.get('/', async (req, res) => {
       const dentistTax = (r.taxonomies || []).find(isDentistTaxonomy);
       const spec = dentistTax ? (dentistTax.desc || dentistTax.description) : (isOrg ? "Dental Practice" : "Dentist");
 
-      // We add mock latitude/longitude to make the map look nice, based loosely on state/zip if we had a mapping.
-      // For now, let's just generate a deterministic mock lat/long near the US center if we can't geocode.
-      // But actually, it's better to just leave it null if we can't geocode, and the map will skip it.
-      // Since it's a demo, let's mock it for the first 10 results to at least show the map working.
-      const lat = 37.0902 + (Math.random() * 10 - 5);
-      const lng = -95.7129 + (Math.random() * 20 - 10);
-
       return { 
         npi: r.number,
         name: practiceName, 
@@ -100,8 +152,8 @@ dentistsRouter.get('/', async (req, res) => {
         city: cityStr, 
         state: stateStr, 
         zip: zipCode, 
-        latitude: lat,
-        longitude: lng,
+        latitude: null as number | null,
+        longitude: null as number | null,
         shadowFriendliness: {
           allowedPercentage: Math.floor(Math.random() * 100),
           avgRating: (Math.random() * 2 + 3).toFixed(1),
@@ -116,6 +168,10 @@ dentistsRouter.get('/', async (req, res) => {
     merged.forEach(x => { if (!m.has(x.npi)) m.set(x.npi, x); });
     merged = Array.from(m.values());
     merged = merged.filter(r => !/\bhygienist\b/i.test(r.specialty || ""));
+
+    // Geocode results for real map pins (rate-limited)
+    // Geocode up to 50 results to ensure distance calculations work for more dentists
+    await batchGeocode(merged, 50);
 
     res.json(merged);
   } catch (error) {

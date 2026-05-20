@@ -191,10 +191,18 @@ export async function sendInitialEmail(request: LORRequest, config: LOREmailConf
 export async function sendReminderEmail(
   request: LORRequest,
   config: LOREmailConfig,
-  daysRelative: number
+  daysRelative: number,
+  target: 'writer' | 'requester' = 'writer'
 ): Promise<boolean> {
   if (!resend) {
     console.warn('⚠️ Resend not configured — skipping reminder email');
+    return false;
+  }
+
+  const isRequester = target === 'requester';
+  const recipientEmail = isRequester ? request.student_email : request.writer_email;
+  if (!recipientEmail) {
+    console.warn(`⚠️ No ${target} email for request ${request.id} — skipping`);
     return false;
   }
 
@@ -202,50 +210,87 @@ export async function sendReminderEmail(
   let urgencyColor: string;
   let bodyText: string;
 
-  if (daysRelative < 0) {
-    // Before due date
-    const daysBefore = Math.abs(daysRelative);
-    title = `Reminder: Letter for ${request.student_name} due in ${daysBefore} day${daysBefore !== 1 ? 's' : ''}`;
-    urgencyColor = '#f59e0b'; // amber
-    bodyText = `Dear ${request.writer_name},\n\nThis is a friendly reminder that the letter of recommendation you are writing for ${request.student_name} is due in ${daysBefore} day${daysBefore !== 1 ? 's' : ''} on ${formatDate(request.due_date)}.\n\nPlease upload your letter using the button below at your earliest convenience.`;
-  } else if (daysRelative === 0) {
-    // Due today
-    title = `Today is the due date for ${request.student_name}'s letter`;
-    urgencyColor = '#6366f1'; // indigo
-    bodyText = `Dear ${request.writer_name},\n\nToday is the due date for the letter of recommendation for ${request.student_name}.\n\nPlease submit your letter using the button below as soon as possible.`;
+  if (isRequester) {
+    // ── Student / Requester reminder ──
+    const customBody = (config.content as any).requesterReminderBody;
+    if (customBody) {
+      bodyText = interpolateVariables(customBody, request);
+    } else if (daysRelative < 0) {
+      bodyText = `Dear ${request.student_name},\n\nThis is an update regarding your letter of recommendation from ${request.writer_name}. The letter is due on ${formatDate(request.due_date)} and has not yet been uploaded.\n\nWe are continuing to follow up with your letter writer. No action is needed from you at this time.`;
+    } else if (daysRelative === 0) {
+      bodyText = `Dear ${request.student_name},\n\nToday is the due date for your letter of recommendation from ${request.writer_name}. The letter has not yet been uploaded.\n\nYou may want to reach out to your letter writer directly to check on the status.`;
+    } else {
+      bodyText = `Dear ${request.student_name},\n\nThe letter of recommendation from ${request.writer_name} is now ${daysRelative} day${daysRelative !== 1 ? 's' : ''} overdue. The original deadline was ${formatDate(request.due_date)}.\n\nWe strongly recommend contacting your letter writer directly to ensure timely submission. If the letter cannot be obtained, please consider arranging an alternative writer.`;
+    }
+
+    if (daysRelative < 0) {
+      title = `Update: Letter from ${request.writer_name} due in ${Math.abs(daysRelative)} day${Math.abs(daysRelative) !== 1 ? 's' : ''}`;
+      urgencyColor = '#f59e0b';
+    } else if (daysRelative === 0) {
+      title = `Today is the due date for your letter from ${request.writer_name}`;
+      urgencyColor = '#6366f1';
+    } else {
+      title = `Action Needed: Letter from ${request.writer_name} is ${daysRelative} day${daysRelative !== 1 ? 's' : ''} overdue`;
+      urgencyColor = '#ef4444';
+    }
   } else {
-    // Overdue
-    title = `Overdue: Letter for ${request.student_name} is ${daysRelative} day${daysRelative !== 1 ? 's' : ''} past due`;
-    urgencyColor = '#ef4444'; // red
-    bodyText = `Dear ${request.writer_name},\n\nThe letter of recommendation for ${request.student_name} is now ${daysRelative} day${daysRelative !== 1 ? 's' : ''} overdue. The original due date was ${formatDate(request.due_date)}.\n\nPlease submit your letter as soon as possible using the button below. Your timely support is greatly appreciated.`;
+    // ── Writer reminder ──
+    const customBody = (config.content as any).writerReminderBody;
+    if (customBody) {
+      bodyText = interpolateVariables(customBody, request);
+    } else if (daysRelative < 0) {
+      const daysBefore = Math.abs(daysRelative);
+      bodyText = `Dear ${request.writer_name},\n\nThis is a friendly reminder that the letter of recommendation you are writing for ${request.student_name} is due in ${daysBefore} day${daysBefore !== 1 ? 's' : ''} on ${formatDate(request.due_date)}.\n\nPlease upload your letter using the button below at your earliest convenience.`;
+    } else if (daysRelative === 0) {
+      bodyText = `Dear ${request.writer_name},\n\nToday is the due date for the letter of recommendation for ${request.student_name}.\n\nPlease submit your letter using the button below as soon as possible.`;
+    } else {
+      bodyText = `Dear ${request.writer_name},\n\nThe letter of recommendation for ${request.student_name} is now ${daysRelative} day${daysRelative !== 1 ? 's' : ''} overdue. The original due date was ${formatDate(request.due_date)}.\n\nPlease submit your letter as soon as possible using the button below. Your timely support is greatly appreciated.`;
+    }
+
+    if (daysRelative < 0) {
+      const daysBefore = Math.abs(daysRelative);
+      title = `Reminder: Letter for ${request.student_name} due in ${daysBefore} day${daysBefore !== 1 ? 's' : ''}`;
+      urgencyColor = '#f59e0b';
+    } else if (daysRelative === 0) {
+      title = `Today is the due date for ${request.student_name}'s letter`;
+      urgencyColor = '#6366f1';
+    } else {
+      title = `Overdue: Letter for ${request.student_name} is ${daysRelative} day${daysRelative !== 1 ? 's' : ''} past due`;
+      urgencyColor = '#ef4444';
+    }
   }
 
   const uploadUrl = getUploadUrl(request.access_code);
+  const ctaText = isRequester ? '📋 Track Your Request' : '📤 Upload Your Letter Now';
+  const ctaUrl = isRequester
+    ? (process.env.FRONTEND_URL || 'http://localhost:3000')
+    : uploadUrl;
+
   const html = buildEmailHtml({
     config,
     title,
     bodyHtml: bodyText.replace(/\n/g, '<br/>'),
-    ctaText: '📤 Upload Your Letter Now',
-    ctaUrl: uploadUrl,
+    ctaText,
+    ctaUrl,
     urgencyColor,
-    footerNote: `Original Due Date: <strong>${formatDate(request.due_date)}</strong> · Access Code: <strong>${request.access_code}</strong>`,
+    footerNote: `Original Due Date: <strong>${formatDate(request.due_date)}</strong>${!isRequester ? ` · Access Code: <strong>${request.access_code}</strong>` : ''}`,
   });
 
   try {
     const { error } = await resend.emails.send({
       from: FROM_EMAIL,
-      to: request.writer_email,
+      to: recipientEmail,
       subject: title,
       html,
     });
     if (error) {
-      console.error('❌ Resend error (reminder):', error);
+      console.error(`❌ Resend error (reminder → ${target}):`, error);
       return false;
     }
-    console.log(`📧 Reminder email sent to ${request.writer_email} (${daysRelative} days relative)`);
+    console.log(`📧 Reminder email sent to ${recipientEmail} [${target}] (${daysRelative} days relative)`);
     return true;
   } catch (err) {
-    console.error('❌ Failed to send reminder email:', err);
+    console.error(`❌ Failed to send ${target} reminder email:`, err);
     return false;
   }
 }

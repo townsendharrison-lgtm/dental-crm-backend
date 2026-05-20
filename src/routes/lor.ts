@@ -119,6 +119,55 @@ async function notifyAdminsLORUploaded(writerName: string, studentName: string, 
   }
 }
 
+// ─── Helper: send in-app + push notification to student ───────
+async function notifyStudentLOREvent(studentId: string, payload: {
+  title: string;
+  message: string;
+  type: 'INFO' | 'WARNING' | 'URGENT';
+  category: string;
+  data?: Record<string, string>;
+}) {
+  if (!studentId) return; // Guest students get email instead, not in-app
+  try {
+    await supabaseAdmin.from('notifications').insert({
+      user_id: studentId,
+      title: payload.title,
+      message: payload.message,
+      type: payload.type,
+      category: payload.category,
+      is_read: false,
+      created_by: 'system',
+    });
+
+    if (messaging) {
+      const { data: tokens } = await supabaseAdmin
+        .from('fcm_tokens')
+        .select('token')
+        .eq('user_id', studentId);
+      if (tokens && tokens.length > 0) {
+        const tokenStrings = tokens.map((t: { token: string }) => t.token);
+        try {
+          await messaging.sendEachForMulticast({
+            tokens: tokenStrings,
+            notification: { title: payload.title, body: payload.message },
+            webpush: {
+              fcmOptions: { link: process.env.FRONTEND_URL || 'http://localhost:3000' },
+              notification: {
+                icon: 'https://images.squarespace-cdn.com/content/64d0277a0640507c114633ad/b8543df7-ec9e-4d64-912e-e80bb44c8757/Untitled+design-3.png?content-type=image%2Fpng',
+              },
+            },
+            data: payload.data || {},
+          });
+        } catch (fcmErr) {
+          console.error('FCM student LOR event push error:', fcmErr);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Error sending student LOR event notification:', err);
+  }
+}
+
 // ─── Helper: send push notification to student ──────────────────
 async function notifyStudentLORReviewed(studentId: string, writerName: string, status: string) {
   if (!studentId) return; // Guest students don't get push notifications
@@ -422,38 +471,52 @@ router.post('/upload/:accessCode', upload.single('file'), async (req: Request, r
     // Notify admins
     await notifyAdminsLORUploaded(lorReq.writer_name, lorReq.student_name, lorReq.id);
 
-    // Send upload confirmation email to student
-    try {
-      const trackingToken = encryptTrackingToken(lorReq.student_email.toLowerCase().trim());
-      const trackingUrl = `${process.env.LOR_GUEST_TRACK_URL || process.env.FRONTEND_URL || 'http://localhost:3000'}/#/guest-letter-track?token=${encodeURIComponent(trackingToken)}`;
-      
-      const { Resend } = await import('resend');
-      const resend = new Resend(process.env.RESEND_API_KEY);
-      await resend.emails.send({
-        from: process.env.LOR_FROM_EMAIL || 'Dental School Guide <no-reply@dentalschoolguide.com>',
-        to: lorReq.student_email,
-        subject: 'Your Letter has been Uploaded!',
-        html: `
-          <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; background-color: #0f172a; color: #f8fafc; padding: 40px; border-radius: 16px;">
-            <h2 style="color: #fff; margin-top: 0;">Upload Successful</h2>
-            <p style="color: #cbd5e1; font-size: 16px; line-height: 1.6;">
-              Hi ${lorReq.student_name},<br><br>
-              <strong>${lorReq.writer_name}</strong> has successfully uploaded your letter of recommendation!
-            </p>
-            <p style="color: #cbd5e1; font-size: 16px; line-height: 1.6;">
-              The letter is now pending review by our team.
-            </p>
-            <div style="margin: 32px 0;">
-              <a href="${trackingUrl}" style="background-color: #4f46e5; color: white; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block;">Track Review Status</a>
-            </div>
-            <p style="color: #64748b; font-size: 14px; margin-top: 40px; border-top: 1px solid #1e293b; padding-top: 20px;">
-              Powered by Dental School Guide
-            </p>
-          </div>
-        `
+    // CRM-registered students track via their dashboard, NOT via the
+    // guest-tracking email link. Only guest students (no student_id) get the
+    // tracking email.
+    if (lorReq.student_id) {
+      // CRM student → in-app + push notification
+      await notifyStudentLOREvent(lorReq.student_id, {
+        title: '📄 Letter Uploaded',
+        message: `${lorReq.writer_name} uploaded your letter of recommendation. It's now pending review.`,
+        type: 'INFO',
+        category: 'LOR_UPLOADED',
+        data: { type: 'LOR_UPLOADED', requestId: lorReq.id },
       });
-    } catch (emailErr) {
-      console.error('Failed to send upload email to student:', emailErr);
+    } else if (lorReq.student_email) {
+      // Guest student → email with tracking link
+      try {
+        const trackingToken = encryptTrackingToken(lorReq.student_email.toLowerCase().trim());
+        const trackingUrl = `${process.env.LOR_GUEST_TRACK_URL || process.env.FRONTEND_URL || 'http://localhost:3000'}/#/guest-letter-track?token=${encodeURIComponent(trackingToken)}`;
+
+        const { Resend } = await import('resend');
+        const resend = new Resend(process.env.RESEND_API_KEY);
+        await resend.emails.send({
+          from: process.env.LOR_FROM_EMAIL || 'Dental School Guide <no-reply@dentalschoolguide.com>',
+          to: lorReq.student_email,
+          subject: 'Your Letter has been Uploaded!',
+          html: `
+            <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; background-color: #0f172a; color: #f8fafc; padding: 40px; border-radius: 16px;">
+              <h2 style="color: #fff; margin-top: 0;">Upload Successful</h2>
+              <p style="color: #cbd5e1; font-size: 16px; line-height: 1.6;">
+                Hi ${lorReq.student_name},<br><br>
+                <strong>${lorReq.writer_name}</strong> has successfully uploaded your letter of recommendation!
+              </p>
+              <p style="color: #cbd5e1; font-size: 16px; line-height: 1.6;">
+                The letter is now pending review by our team.
+              </p>
+              <div style="margin: 32px 0;">
+                <a href="${trackingUrl}" style="background-color: #4f46e5; color: white; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block;">Track Review Status</a>
+              </div>
+              <p style="color: #64748b; font-size: 14px; margin-top: 40px; border-top: 1px solid #1e293b; padding-top: 20px;">
+                Powered by Dental School Guide
+              </p>
+            </div>
+          `
+        });
+      } catch (emailErr) {
+        console.error('Failed to send upload email to guest student:', emailErr);
+      }
     }
 
     res.json({ success: true, message: 'Letter uploaded successfully' });

@@ -47,6 +47,13 @@ export async function checkAndSendReminders() {
     return;
   }
 
+  // Normalize schedule entries: support both legacy number[] and new {days,target}[]
+  const normalizedSchedule: Array<{ days: number; target: 'writer' | 'requester' }> =
+    config.reminder_schedule.map((entry: any) => {
+      if (typeof entry === 'number') return { days: entry, target: 'writer' as const };
+      return { days: entry.days ?? 0, target: entry.target || 'writer' };
+    });
+
   // 2. Get all active (REQUESTED or DECLINED) requests that haven't stopped reminders
   const { data: requests, error: reqError } = await supabaseAdmin
     .from('lor_requests')
@@ -77,43 +84,58 @@ export async function checkAndSendReminders() {
     const diffMs = today.getTime() - dueDate.getTime();
     const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
 
-    // Check if today matches any scheduled reminder day
-    if (!config.reminder_schedule.includes(diffDays)) {
-      continue;
-    }
+    // Check all matching schedule entries for today
+    const matchingEntries = normalizedSchedule.filter(e => e.days === diffDays);
+    if (matchingEntries.length === 0) continue;
 
-    // Check if we already sent a reminder for this day
-    const { data: existingLog } = await supabaseAdmin
-      .from('lor_email_log')
-      .select('id')
-      .eq('lor_request_id', req.id)
-      .eq('email_type', 'REMINDER')
-      .eq('days_relative', diffDays)
-      .limit(1);
+    for (const scheduleEntry of matchingEntries) {
+      const targetType = scheduleEntry.target;
 
-    if (existingLog && existingLog.length > 0) {
-      continue; // Already sent for this day
-    }
+      // Check if we already sent a reminder for this day + target
+      const { data: existingLog } = await supabaseAdmin
+        .from('lor_email_log')
+        .select('id')
+        .eq('lor_request_id', req.id)
+        .eq('email_type', 'REMINDER')
+        .eq('days_relative', diffDays)
+        .eq('recipient_email', targetType === 'writer' ? req.writer_email : (req.student_email || ''))
+        .limit(1);
 
-    // Send reminder
-    const sent = await sendReminderEmail(req, config, diffDays);
+      if (existingLog && existingLog.length > 0) continue;
 
-    if (sent) {
-      // Log the email
-      await supabaseAdmin.from('lor_email_log').insert({
-        lor_request_id: req.id,
-        email_type: 'REMINDER',
-        recipient_email: req.writer_email,
-        days_relative: diffDays,
-      });
+      let sent = false;
+      let recipientEmail = '';
 
-      // Update last_reminder_sent_at
-      await supabaseAdmin
-        .from('lor_requests')
-        .update({ last_reminder_sent_at: new Date().toISOString() })
-        .eq('id', req.id);
+      if (targetType === 'writer') {
+        // Send to letter writer
+        sent = await sendReminderEmail(req, config, diffDays, 'writer');
+        recipientEmail = req.writer_email;
+      } else {
+        // Send to student/requester
+        if (req.student_email) {
+          sent = await sendReminderEmail(req, config, diffDays, 'requester');
+          recipientEmail = req.student_email;
+        } else {
+          console.log(`⚠️ No student email for request ${req.id} — skipping requester reminder`);
+          continue;
+        }
+      }
 
-      sentCount++;
+      if (sent) {
+        await supabaseAdmin.from('lor_email_log').insert({
+          lor_request_id: req.id,
+          email_type: 'REMINDER',
+          recipient_email: recipientEmail,
+          days_relative: diffDays,
+        });
+
+        await supabaseAdmin
+          .from('lor_requests')
+          .update({ last_reminder_sent_at: new Date().toISOString() })
+          .eq('id', req.id);
+
+        sentCount++;
+      }
     }
   }
 
