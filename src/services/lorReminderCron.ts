@@ -72,16 +72,23 @@ export async function checkAndSendReminders() {
   }
 
   const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const todayUTC = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
 
   let sentCount = 0;
 
   for (const req of requests) {
-    const dueDate = new Date(req.due_date);
-    dueDate.setHours(0, 0, 0, 0);
+    let dueDateUTC: number;
+    const dateStr = req.due_date;
+    if (dateStr && !dateStr.includes('T') && dateStr.includes('-')) {
+      const [year, month, day] = dateStr.split('-').map(Number);
+      dueDateUTC = Date.UTC(year, month - 1, day);
+    } else {
+      const parsedDate = new Date(dateStr || Date.now());
+      dueDateUTC = Date.UTC(parsedDate.getFullYear(), parsedDate.getMonth(), parsedDate.getDate());
+    }
 
     // Calculate days difference: negative = before due, positive = after due
-    const diffMs = today.getTime() - dueDate.getTime();
+    const diffMs = todayUTC - dueDateUTC;
     const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
 
     // Check all matching schedule entries for today
