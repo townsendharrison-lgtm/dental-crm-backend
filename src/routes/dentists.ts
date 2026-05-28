@@ -154,11 +154,6 @@ dentistsRouter.get('/', async (req, res) => {
         zip: zipCode, 
         latitude: null as number | null,
         longitude: null as number | null,
-        shadowFriendliness: {
-          allowedPercentage: Math.floor(Math.random() * 100),
-          avgRating: (Math.random() * 2 + 3).toFixed(1),
-          totalReports: Math.floor(Math.random() * 20)
-        }
       };
     };
 

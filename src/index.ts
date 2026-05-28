@@ -11,6 +11,7 @@ import { notificationRouter } from './routes/notifications.js';
 import { leadsRouter } from './routes/leads.js';
 import { lorRouter } from './routes/lor.js';
 import { dentistsRouter } from './routes/dentists.js';
+import { shadowReportsRouter } from './routes/shadowReports.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { startReminderCron } from './services/lorReminderCron.js';
 
@@ -56,6 +57,7 @@ app.use('/api/notifications', notificationRouter);
 app.use('/api/leads', leadsRouter);
 app.use('/api/lor', lorRouter);
 app.use('/api/dentists', dentistsRouter);
+app.use('/api/shadow-reports', shadowReportsRouter);
 
 // Health check
 app.get('/health', (req, res) => {
