@@ -728,6 +728,115 @@ router.patch('/requests/:id/status', authenticate, authorize('ADMIN'), async (re
   }
 });
 
+// ─── DELETE /api/lor/requests/:id — Admin deletes a request ───
+router.delete('/requests/:id', authenticate, authorize('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    // Get the request to find the document path
+    const { data: lorReq, error: findError } = await supabaseAdmin
+      .from('lor_requests')
+      .select('id, document_url')
+      .eq('id', id)
+      .single();
+
+    if (findError || !lorReq) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
+
+    // Delete the uploaded document from Supabase Storage if it exists
+    if (lorReq.document_url) {
+      const { error: storageError } = await supabaseAdmin
+        .storage
+        .from('lor-documents')
+        .remove([lorReq.document_url]);
+
+      if (storageError) {
+        console.warn('Failed to delete storage file (continuing anyway):', storageError.message);
+      }
+    }
+
+    // Delete email log entries (CASCADE should handle this, but be explicit)
+    await supabaseAdmin
+      .from('lor_email_log')
+      .delete()
+      .eq('lor_request_id', id);
+
+    // Delete the request itself
+    const { error: deleteError } = await supabaseAdmin
+      .from('lor_requests')
+      .delete()
+      .eq('id', id);
+
+    if (deleteError) {
+      return res.status(400).json({ error: deleteError.message });
+    }
+
+    res.json({ success: true, message: 'Request and associated files deleted successfully' });
+  } catch (err) {
+    console.error('Delete LOR request error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ─── DELETE /api/lor/requests — Admin bulk deletes requests ───
+router.delete('/requests', authenticate, authorize('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { ids } = req.body;
+
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'An array of request IDs is required' });
+    }
+
+    // Get all requests to find document paths
+    const { data: lorReqs, error: findError } = await supabaseAdmin
+      .from('lor_requests')
+      .select('id, document_url')
+      .in('id', ids);
+
+    if (findError) {
+      return res.status(400).json({ error: findError.message });
+    }
+
+    // Delete all uploaded documents from Storage
+    const filePaths = (lorReqs || [])
+      .filter((r: any) => r.document_url)
+      .map((r: any) => r.document_url);
+
+    if (filePaths.length > 0) {
+      const { error: storageError } = await supabaseAdmin
+        .storage
+        .from('lor-documents')
+        .remove(filePaths);
+
+      if (storageError) {
+        console.warn('Failed to delete some storage files (continuing anyway):', storageError.message);
+      }
+    }
+
+    // Delete email log entries
+    await supabaseAdmin
+      .from('lor_email_log')
+      .delete()
+      .in('lor_request_id', ids);
+
+    // Delete the requests
+    const { error: deleteError } = await supabaseAdmin
+      .from('lor_requests')
+      .delete()
+      .in('id', ids);
+
+    if (deleteError) {
+      return res.status(400).json({ error: deleteError.message });
+    }
+
+    res.json({ success: true, message: `${ids.length} request(s) deleted successfully`, deletedCount: ids.length });
+  } catch (err) {
+    console.error('Bulk delete LOR requests error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // ─── GET /api/lor/documents/:requestId — Signed URL ────────────
 router.get('/documents/:requestId', authenticate, authorize('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
