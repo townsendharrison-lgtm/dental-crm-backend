@@ -1,24 +1,113 @@
 import { Router } from 'express';
+import { supabaseAdmin } from '../config/supabase.js';
 
 export const dentistsRouter = Router();
+
+// Haversine Formula for distance calculation (miles)
+function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 3958.8; // miles
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = 
+    Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+    Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
 
 // ─── Geocoding cache (in-memory, persists for server lifetime) ──────
 const geocodeCache = new Map<string, { lat: number; lng: number } | null>();
 
+// Rate-limiting OSM Nominatim calls (compliance with 1 request per second policy)
+let lastGeocodeTime = 0;
+async function rateLimitNominatim(): Promise<void> {
+  const now = Date.now();
+  const timeSinceLast = now - lastGeocodeTime;
+  if (timeSinceLast < 1100) {
+    await new Promise(resolve => setTimeout(resolve, 1100 - timeSinceLast));
+  }
+  lastGeocodeTime = Date.now();
+}
+
+async function getCachedGeocodes(addressKeys: string[]): Promise<Map<string, { lat: number; lng: number } | null>> {
+  const result = new Map<string, { lat: number; lng: number } | null>();
+  if (addressKeys.length === 0) return result;
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('dentist_geocodes')
+      .select('address_key, latitude, longitude')
+      .in('address_key', addressKeys);
+
+    if (error) {
+      console.error('Error fetching cached geocodes:', error);
+      return result;
+    }
+
+    for (const row of (data || [])) {
+      if (row.latitude !== null && row.longitude !== null) {
+        result.set(row.address_key, { lat: row.latitude, lng: row.longitude });
+      } else {
+        result.set(row.address_key, null);
+      }
+    }
+  } catch (err) {
+    console.error('Error in getCachedGeocodes:', err);
+  }
+
+  return result;
+}
+
+async function saveCachedGeocode(addressKey: string, lat: number | null, lng: number | null): Promise<void> {
+  try {
+    await supabaseAdmin
+      .from('dentist_geocodes')
+      .upsert({
+        address_key: addressKey,
+        latitude: lat,
+        longitude: lng
+      }, { onConflict: 'address_key' });
+  } catch (err) {
+    console.error('Error saving cached geocode:', err);
+  }
+}
+
 async function geocodeAddress(street: string, city: string, state: string, zip: string): Promise<{ lat: number; lng: number } | null> {
-  // Build a cache key from the address components
-  const cacheKey = `${street}|${city}|${state}|${zip}`.toLowerCase();
+  const cacheKey = `${street}|${city}|${state}|${zip}`.toLowerCase().trim();
   if (geocodeCache.has(cacheKey)) return geocodeCache.get(cacheKey)!;
 
-  // Try progressively less specific queries for better hit rate
-  const queries = [
-    `${street}, ${city}, ${state} ${zip}`,
-    `${city}, ${state} ${zip}`,
-    `${zip}, ${state}`,
-  ];
+  // Check database cache first
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('dentist_geocodes')
+      .select('latitude, longitude')
+      .eq('address_key', cacheKey)
+      .limit(1);
+
+    if (!error && data && data.length > 0) {
+      const row = data[0];
+      const result = row.latitude !== null && row.longitude !== null 
+        ? { lat: row.latitude, lng: row.longitude } 
+        : null;
+      geocodeCache.set(cacheKey, result);
+      return result;
+    }
+  } catch (err) {
+    console.error('Database cache fetch error:', err);
+  }
+
+  // Fallback to query Nominatim
+  const queries: string[] = [];
+  if (street || city || state || zip) {
+    queries.push([street, city, state, zip].filter(Boolean).join(', '));
+    queries.push([city, state, zip].filter(Boolean).join(', '));
+    queries.push([zip, state].filter(Boolean).join(', '));
+  }
 
   for (const q of queries) {
     try {
+      await rateLimitNominatim();
       const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1&countrycodes=us`;
       const r = await fetch(url, {
         headers: { 'User-Agent': 'DentalSchoolGuideCRM/1.0' },
@@ -28,47 +117,78 @@ async function geocodeAddress(street: string, city: string, state: string, zip: 
       if (data && data.length > 0) {
         const result = { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
         geocodeCache.set(cacheKey, result);
+        await saveCachedGeocode(cacheKey, result.lat, result.lng);
         return result;
       }
     } catch (err) {
-      // Continue to next query
+      console.error(`Nominatim query error for "${q}":`, err);
     }
   }
 
+  // Cache failure to avoid querying Nominatim again
   geocodeCache.set(cacheKey, null);
+  await saveCachedGeocode(cacheKey, null, null);
   return null;
 }
 
-// Rate-limited batch geocoding — 1 request per second for Nominatim compliance
-async function batchGeocode(rows: any[], maxCount: number = 50): Promise<void> {
-  const toGeocode = rows.slice(0, maxCount).filter(r => r.address || r.city || r.zip);
-  let successCount = 0;
-  for (let i = 0; i < toGeocode.length; i++) {
-    const r = toGeocode[i];
-    const result = await geocodeAddress(r.address, r.city, r.state, r.zip);
-    if (result) {
-      r.latitude = result.lat;
-      r.longitude = result.lng;
-      successCount++;
-    } else {
-      console.warn(`Geocoding failed for: ${r.address}, ${r.city}, ${r.state} ${r.zip}`);
+async function getShadowStatsForNpis(npiList: string[]): Promise<Record<string, { allowedPercentage: number; avgRating: number; totalReports: number }>> {
+  const statsMap: Record<string, { allowedPercentage: number; avgRating: number; totalReports: number }> = {};
+  if (npiList.length === 0) return statsMap;
+
+  try {
+    const { data: reports, error } = await supabaseAdmin
+      .from('dentist_shadow_reports')
+      .select('npi, allowed, rating')
+      .in('npi', npiList);
+
+    if (error) {
+      console.error('Shadow stats batch fetch error:', error);
+      return statsMap;
     }
-    // Rate limit: wait 1.1s between requests (Nominatim requires max 1 req/s)
-    if (i < toGeocode.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 1100));
+
+    const grouped: Record<string, Array<{ allowed: boolean; rating: number }>> = {};
+    for (const r of (reports || [])) {
+      if (!grouped[r.npi]) grouped[r.npi] = [];
+      grouped[r.npi].push({ allowed: r.allowed, rating: r.rating });
     }
+
+    for (const npi of npiList) {
+      const recs = grouped[npi] || [];
+      const total = recs.length;
+      const allowedCount = recs.filter(r => r.allowed).length;
+      const ratingSum = recs.reduce((sum, r) => sum + r.rating, 0);
+
+      statsMap[npi] = {
+        allowedPercentage: total > 0 ? Math.round((allowedCount / total) * 100) : 0,
+        avgRating: total > 0 ? Number((ratingSum / total).toFixed(1)) : 0,
+        totalReports: total,
+      };
+    }
+  } catch (err) {
+    console.error('Error in getShadowStatsForNpis:', err);
   }
-  console.log(`Geocoded ${successCount}/${toGeocode.length} addresses`);
+
+  return statsMap;
 }
 
 dentistsRouter.get('/', async (req, res) => {
   try {
-    const { zip, city, state, name } = req.query;
+    const { zip, city, state, name, specialty, sortBy } = req.query;
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+    const maxDistance = parseFloat(req.query.maxDistance as string) || 25;
+    const userLat = req.query.userLat ? parseFloat(req.query.userLat as string) : null;
+    const userLng = req.query.userLng ? parseFloat(req.query.userLng as string) : null;
 
     const q1 = new URLSearchParams();
     q1.set("version", "2.1");
     q1.set("enumeration_type", "NPI-1");
-    q1.set("taxonomy_description", "Dentist");
+    
+    if (specialty) {
+      q1.set("taxonomy_code", specialty as string);
+    } else {
+      q1.set("taxonomy_description", "Dentist");
+    }
 
     if (zip) q1.set("postal_code", `${zip}*`);
     if (state) q1.set("state", state as string);
@@ -154,21 +274,122 @@ dentistsRouter.get('/', async (req, res) => {
         zip: zipCode, 
         latitude: null as number | null,
         longitude: null as number | null,
+        distance: undefined as number | undefined,
+        shadowStats: undefined as any
       };
     };
 
+    // Filter and map NPPES results
     merged = merged.filter(isDentistRecord).map(toRow);
 
+    // De-duplicate by NPI
     const m = new Map();
     merged.forEach(x => { if (!m.has(x.npi)) m.set(x.npi, x); });
     merged = Array.from(m.values());
     merged = merged.filter(r => !/\bhygienist\b/i.test(r.specialty || ""));
 
-    // Geocode results for real map pins (rate-limited)
-    // Geocode up to 50 results to ensure distance calculations work for more dentists
-    await batchGeocode(merged, 50);
+    // 1. Batch fetch cached coordinates from Supabase to avoid individual database queries
+    const addressKeys = merged.map(r => `${r.address}|${r.city}|${r.state}|${r.zip}`.toLowerCase().trim());
+    const dbCache = await getCachedGeocodes(addressKeys);
 
-    res.json(merged);
+    // Apply cached coordinates to dentists list
+    merged.forEach(r => {
+      const key = `${r.address}|${r.city}|${r.state}|${r.zip}`.toLowerCase().trim();
+      if (dbCache.has(key)) {
+        const coords = dbCache.get(key);
+        if (coords) {
+          r.latitude = coords.lat;
+          r.longitude = coords.lng;
+        }
+      }
+    });
+
+    // 2. Batch fetch shadow stats from Supabase
+    const npiList = merged.map(r => r.npi);
+    const statsMap = await getShadowStatsForNpis(npiList);
+    merged.forEach(r => {
+      r.shadowStats = statsMap[r.npi] || { allowedPercentage: 0, avgRating: 0, totalReports: 0 };
+    });
+
+    // 3. Determine the coordinate origin for distance calculation (Miles)
+    let originLat: number | null = userLat;
+    let originLng: number | null = userLng;
+
+    if (originLat === null || originLng === null) {
+      const parts: string[] = [];
+      if (city) parts.push(city as string);
+      if (state) parts.push(state as string);
+      if (zip) parts.push(zip as string);
+
+      if (parts.length > 0) {
+        const searchAddr = parts.join(', ');
+        const searchOrigin = await geocodeAddress('', '', '', searchAddr);
+        if (searchOrigin) {
+          originLat = searchOrigin.lat;
+          originLng = searchOrigin.lng;
+        }
+      }
+    }
+
+    // 4. Calculate distances from origin if coordinates are available
+    if (originLat !== null && originLng !== null) {
+      merged.forEach(r => {
+        if (r.latitude !== null && r.longitude !== null) {
+          r.distance = calculateDistance(originLat!, originLng!, r.latitude, r.longitude);
+        }
+      });
+    }
+
+    // 5. Filter by radius (maxDistance) if origin is available and maxDistance < 100
+    if (originLat !== null && originLng !== null && maxDistance < 100) {
+      merged = merged.filter(r => r.distance === undefined || r.distance <= maxDistance);
+    }
+
+    // 6. Sort results
+    merged.sort((a, b) => {
+      const distA = a.distance ?? 9999;
+      const distB = b.distance ?? 9999;
+
+      switch (sortBy) {
+        case 'nearest':
+          return distA - distB;
+        case 'rating':
+          return (b.shadowStats?.avgRating || 0) - (a.shadowStats?.avgRating || 0);
+        case 'friendly':
+          return (b.shadowStats?.allowedPercentage || 0) - (a.shadowStats?.allowedPercentage || 0);
+        case 'alpha':
+        default:
+          return a.name.localeCompare(b.name);
+      }
+    });
+
+    // 7. Paginate the sorted results
+    const totalResults = merged.length;
+    const totalPages = Math.ceil(totalResults / limit);
+    const startIdx = (page - 1) * limit;
+    const pageSlice = merged.slice(startIdx, startIdx + limit);
+
+    // 8. Synchronously geocode ONLY the pageSlice items that are uncached
+    // (This guarantees the current page's map pins will render correctly)
+    for (const dentist of pageSlice) {
+      if (dentist.latitude === null || dentist.longitude === null) {
+        const coords = await geocodeAddress(dentist.address, dentist.city, dentist.state, dentist.zip);
+        if (coords) {
+          dentist.latitude = coords.lat;
+          dentist.longitude = coords.lng;
+          if (originLat !== null && originLng !== null) {
+            dentist.distance = calculateDistance(originLat, originLng, coords.lat, coords.lng);
+          }
+        }
+      }
+    }
+
+    res.json({
+      results: pageSlice,
+      total: totalResults,
+      page,
+      totalPages
+    });
   } catch (error) {
     console.error('Error in dentists route:', error);
     res.status(500).json({ error: 'Failed to fetch dentists' });
