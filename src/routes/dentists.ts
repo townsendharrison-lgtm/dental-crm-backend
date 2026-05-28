@@ -105,6 +105,8 @@ async function geocodeAddress(street: string, city: string, state: string, zip: 
     queries.push([zip, state].filter(Boolean).join(', '));
   }
 
+  let searchAttemptedSuccessfully = false;
+
   for (const q of queries) {
     try {
       await rateLimitNominatim();
@@ -112,8 +114,15 @@ async function geocodeAddress(street: string, city: string, state: string, zip: 
       const r = await fetch(url, {
         headers: { 'User-Agent': 'DentalSchoolGuideCRM/1.0' },
       });
-      if (!r.ok) continue;
+      
+      if (!r.ok) {
+        console.warn(`Nominatim returned status ${r.status} for query: ${q}`);
+        continue;
+      }
+      
       const data: any = await r.json();
+      searchAttemptedSuccessfully = true;
+
       if (data && data.length > 0) {
         const result = { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
         geocodeCache.set(cacheKey, result);
@@ -125,9 +134,11 @@ async function geocodeAddress(street: string, city: string, state: string, zip: 
     }
   }
 
-  // Cache failure to avoid querying Nominatim again
-  geocodeCache.set(cacheKey, null);
-  await saveCachedGeocode(cacheKey, null, null);
+  // Only cache failure if we successfully communicated with Nominatim and it found no results
+  if (searchAttemptedSuccessfully) {
+    geocodeCache.set(cacheKey, null);
+    await saveCachedGeocode(cacheKey, null, null);
+  }
   return null;
 }
 
