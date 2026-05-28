@@ -351,12 +351,8 @@ dentistsRouter.get('/', async (req, res) => {
       });
     }
 
-    // 5. Filter by radius (maxDistance) if origin is available and maxDistance < 100
-    if (originLat !== null && originLng !== null && maxDistance < 100) {
-      merged = merged.filter(r => r.distance === undefined || r.distance <= maxDistance);
-    }
-
-    // 6. Sort results
+    // 5. Sort results (distance is used for sorting, NOT for hard-filtering,
+    //    so pagination is consistent regardless of geocode cache state).
     merged.sort((a, b) => {
       const distA = a.distance ?? 9999;
       const distB = b.distance ?? 9999;
@@ -374,13 +370,13 @@ dentistsRouter.get('/', async (req, res) => {
       }
     });
 
-    // 7. Paginate the sorted results
+    // 6. Paginate the sorted results
     const totalResults = merged.length;
     const totalPages = Math.ceil(totalResults / limit);
     const startIdx = (page - 1) * limit;
     const pageSlice = merged.slice(startIdx, startIdx + limit);
 
-    // 8. Synchronously geocode ONLY the pageSlice items that are uncached
+    // 7. Synchronously geocode ONLY the pageSlice items that are uncached
     // (This guarantees the current page's map pins will render correctly)
     for (const dentist of pageSlice) {
       if (dentist.latitude === null || dentist.longitude === null) {
