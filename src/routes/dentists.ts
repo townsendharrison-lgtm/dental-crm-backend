@@ -41,46 +41,34 @@ function sanitizeStreet(raw: string): string {
   return s;
 }
 
-// Core Nominatim request with retry on 429 / timeout
-async function nominatimRequest(url: string, label: string, retries = 2): Promise<{ lat: number; lng: number } | null> {
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      await rateLimitNominatim();
-      const r = await fetch(url, {
-        headers: { 'User-Agent': 'DentalSchoolGuideCRM/1.0' },
-        signal: AbortSignal.timeout(8000),
-      });
+// Single Nominatim request — no retries to keep responses fast
+async function nominatimRequest(url: string, label: string): Promise<{ lat: number; lng: number } | null> {
+  try {
+    await rateLimitNominatim();
+    const r = await fetch(url, {
+      headers: { 'User-Agent': 'DentalSchoolGuideCRM/1.0' },
+      signal: AbortSignal.timeout(5000),
+    });
 
-      if (r.status === 429) {
-        console.warn(`Nominatim 429 on attempt ${attempt + 1} for: ${label}`);
-        await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
-        continue;
-      }
-      if (!r.ok) {
-        console.warn(`Nominatim ${r.status} for: ${label}`);
-        return null;
-      }
-
-      const data: any = await r.json();
-      if (data && data.length > 0) {
-        const lat = parseFloat(data[0].lat);
-        const lng = parseFloat(data[0].lon);
-        if (!isNaN(lat) && !isNaN(lng)) return { lat, lng };
-      }
-      return null; // empty result set — don't retry
-    } catch (err: any) {
-      if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
-        console.warn(`Nominatim timeout attempt ${attempt + 1} for: ${label}`);
-        if (attempt < retries) continue;
-      }
-      console.error(`Nominatim error for "${label}":`, err);
+    if (!r.ok) {
+      console.warn(`Nominatim ${r.status} for: ${label}`);
       return null;
     }
+
+    const data: any = await r.json();
+    if (data && data.length > 0) {
+      const lat = parseFloat(data[0].lat);
+      const lng = parseFloat(data[0].lon);
+      if (!isNaN(lat) && !isNaN(lng)) return { lat, lng };
+    }
+    return null;
+  } catch (err: any) {
+    console.warn(`Nominatim error for "${label}":`, err?.message || err);
+    return null;
   }
-  return null;
 }
 
-// Structured Nominatim query (street/city/state/postalcode as separate params — far more reliable)
+// Structured Nominatim query (street/city/state/postalcode as separate params — more reliable)
 function buildStructuredUrl(street?: string, city?: string, state?: string, postalcode?: string): string {
   const params = new URLSearchParams({ format: 'json', limit: '1', countrycodes: 'us' });
   if (street) params.set('street', street);
@@ -90,48 +78,32 @@ function buildStructuredUrl(street?: string, city?: string, state?: string, post
   return `https://nominatim.openstreetmap.org/search?${params.toString()}`;
 }
 
-// Free-text Nominatim query (fallback)
-function buildFreeTextUrl(q: string): string {
-  return `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1&countrycodes=us`;
-}
-
-// Geocode an address via Nominatim using a structured → free-text fallback chain.
+// Geocode an address via Nominatim — at most 2 API calls per address.
 // Results are deduped per-request in the route handler.
 async function geocodeAddress(street: string, city: string, state: string, zip: string): Promise<{ lat: number; lng: number } | null> {
   const cleanStreet = sanitizeStreet(street);
-
-  // Skip addresses that are purely PO Boxes (sanitizeStreet would have emptied them)
   const hasMeaningfulStreet = cleanStreet.length > 0;
 
-  // --- Strategy 1: Structured query with full address ---
-  if (hasMeaningfulStreet && (city || state || zip)) {
-    const url = buildStructuredUrl(cleanStreet, city, state, zip);
-    const result = await nominatimRequest(url, `structured(${cleanStreet}, ${city}, ${state}, ${zip})`);
-    if (result) return result;
-  }
-
-  // --- Strategy 2: Structured query without street (city/state/zip only) ---
+  // Attempt 1: Structured query (with or without street)
   if (city || state || zip) {
-    const url = buildStructuredUrl(undefined, city, state, zip);
-    const result = await nominatimRequest(url, `structured(city=${city}, state=${state}, zip=${zip})`);
+    const url = buildStructuredUrl(
+      hasMeaningfulStreet ? cleanStreet : undefined,
+      city, state, zip
+    );
+    const label = hasMeaningfulStreet
+      ? `structured(${cleanStreet}, ${city}, ${state}, ${zip})`
+      : `structured(city=${city}, state=${state}, zip=${zip})`;
+    const result = await nominatimRequest(url, label);
     if (result) return result;
   }
 
-  // --- Strategy 3: Free-text zip code (Nominatim resolves US zips well) ---
+  // Attempt 2: Fallback — just zip code as a structured postalcode query
   if (zip) {
-    const url = buildFreeTextUrl(zip);
-    const result = await nominatimRequest(url, `freetext(${zip})`);
+    const url = buildStructuredUrl(undefined, undefined, state || undefined, zip);
+    const result = await nominatimRequest(url, `zip-fallback(${zip})`);
     if (result) return result;
   }
 
-  // --- Strategy 4: Free-text city + state ---
-  if (city && state) {
-    const url = buildFreeTextUrl(`${city}, ${state}`);
-    const result = await nominatimRequest(url, `freetext(${city}, ${state})`);
-    if (result) return result;
-  }
-
-  console.warn(`Geocoding failed — street: "${street}", city: "${city}", state: "${state}", zip: "${zip}"`);
   return null;
 }
 
