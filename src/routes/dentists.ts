@@ -16,9 +16,6 @@ function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
   return R * c;
 }
 
-// ─── Geocoding cache (in-memory, persists for server lifetime) ──────
-const geocodeCache = new Map<string, { lat: number; lng: number } | null>();
-
 // Rate-limiting OSM Nominatim calls (compliance with 1 request per second policy)
 let lastGeocodeTime = 0;
 async function rateLimitNominatim(): Promise<void> {
@@ -30,82 +27,14 @@ async function rateLimitNominatim(): Promise<void> {
   lastGeocodeTime = Date.now();
 }
 
-async function getCachedGeocodes(addressKeys: string[]): Promise<Map<string, { lat: number; lng: number } | null>> {
-  const result = new Map<string, { lat: number; lng: number } | null>();
-  if (addressKeys.length === 0) return result;
-
-  try {
-    const { data, error } = await supabaseAdmin
-      .from('dentist_geocodes')
-      .select('address_key, latitude, longitude')
-      .in('address_key', addressKeys);
-
-    if (error) {
-      console.error('Error fetching cached geocodes:', error);
-      return result;
-    }
-
-    for (const row of (data || [])) {
-      if (row.latitude !== null && row.longitude !== null) {
-        result.set(row.address_key, { lat: row.latitude, lng: row.longitude });
-      } else {
-        result.set(row.address_key, null);
-      }
-    }
-  } catch (err) {
-    console.error('Error in getCachedGeocodes:', err);
-  }
-
-  return result;
-}
-
-async function saveCachedGeocode(addressKey: string, lat: number | null, lng: number | null): Promise<void> {
-  try {
-    await supabaseAdmin
-      .from('dentist_geocodes')
-      .upsert({
-        address_key: addressKey,
-        latitude: lat,
-        longitude: lng
-      }, { onConflict: 'address_key' });
-  } catch (err) {
-    console.error('Error saving cached geocode:', err);
-  }
-}
-
+// Geocode an address via Nominatim (no caching — results are deduped per-request in the route handler)
 async function geocodeAddress(street: string, city: string, state: string, zip: string): Promise<{ lat: number; lng: number } | null> {
-  const cacheKey = `${street}|${city}|${state}|${zip}`.toLowerCase().trim();
-  if (geocodeCache.has(cacheKey)) return geocodeCache.get(cacheKey)!;
-
-  // Check database cache first
-  try {
-    const { data, error } = await supabaseAdmin
-      .from('dentist_geocodes')
-      .select('latitude, longitude')
-      .eq('address_key', cacheKey)
-      .limit(1);
-
-    if (!error && data && data.length > 0) {
-      const row = data[0];
-      const result = row.latitude !== null && row.longitude !== null 
-        ? { lat: row.latitude, lng: row.longitude } 
-        : null;
-      geocodeCache.set(cacheKey, result);
-      return result;
-    }
-  } catch (err) {
-    console.error('Database cache fetch error:', err);
-  }
-
-  // Fallback to query Nominatim
   const queries: string[] = [];
   if (street || city || state || zip) {
     queries.push([street, city, state, zip].filter(Boolean).join(', '));
     queries.push([city, state, zip].filter(Boolean).join(', '));
     queries.push([zip, state].filter(Boolean).join(', '));
   }
-
-  let searchAttemptedSuccessfully = false;
 
   for (const q of queries) {
     try {
@@ -121,23 +50,12 @@ async function geocodeAddress(street: string, city: string, state: string, zip: 
       }
       
       const data: any = await r.json();
-      searchAttemptedSuccessfully = true;
-
       if (data && data.length > 0) {
-        const result = { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
-        geocodeCache.set(cacheKey, result);
-        await saveCachedGeocode(cacheKey, result.lat, result.lng);
-        return result;
+        return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
       }
     } catch (err) {
       console.error(`Nominatim query error for "${q}":`, err);
     }
-  }
-
-  // Only cache failure if we successfully communicated with Nominatim and it found no results
-  if (searchAttemptedSuccessfully) {
-    geocodeCache.set(cacheKey, null);
-    await saveCachedGeocode(cacheKey, null, null);
   }
   return null;
 }
@@ -187,9 +105,12 @@ dentistsRouter.get('/', async (req, res) => {
     const { zip, city, state, name, specialty, sortBy } = req.query;
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 20;
-    const maxDistance = parseFloat(req.query.maxDistance as string) || 25;
     const userLat = req.query.userLat ? parseFloat(req.query.userLat as string) : null;
     const userLng = req.query.userLng ? parseFloat(req.query.userLng as string) : null;
+
+    // ── Build NPI API queries ───────────────────────────────────────────
+    // Use NPI API's native pagination (skip/limit) directly.
+    const skip = (page - 1) * limit;
 
     const q1 = new URLSearchParams();
     q1.set("version", "2.1");
@@ -222,28 +143,40 @@ dentistsRouter.get('/', async (req, res) => {
       q2.set("organization_name", (name as string).trim());
     }
 
-    q1.set("limit", "200");
-    q2.set("limit", "200");
+    // Fetch a larger window from the NPI API to account for dedup/filtering losses.
+    // We request 2x the desired limit so that after dedup/filter we still have
+    // enough results. The skip is scaled accordingly.
+    const fetchLimit = limit * 2;
+    const fetchSkip = (page - 1) * fetchLimit;
+    q1.set("skip", String(fetchSkip));
+    q1.set("limit", String(fetchLimit));
+    q2.set("skip", String(fetchSkip));
+    q2.set("limit", String(fetchLimit));
 
     const fetchDentists = async (q: URLSearchParams) => {
       const url = "https://npiregistry.cms.hhs.gov/api/?" + q.toString();
       try {
         const r = await fetch(url);
-        if (!r.ok) return [];
+        if (!r.ok) return { results: [], resultCount: 0 };
         const data: any = await r.json();
-        return data.results || [];
+        return { 
+          results: data.results || [],
+          resultCount: data.result_count || 0
+        };
       } catch (err) {
         console.error("NPI fetch error:", err);
-        return [];
+        return { results: [], resultCount: 0 };
       }
     };
 
-    const [res1, res2] = await Promise.all([
+    const [npi1, npi2] = await Promise.all([
       fetchDentists(q1),
       fetchDentists(q2)
     ]);
 
-    let merged = [...res1, ...res2];
+    let merged = [...npi1.results, ...npi2.results];
+    // Use the larger result_count as the approximate total from NPI
+    const npiTotalEstimate = Math.max(npi1.resultCount, npi2.resultCount);
 
     const isDentistTaxonomy = (t: any) => {
       const code = (t.code || "").toUpperCase();
@@ -299,30 +232,17 @@ dentistsRouter.get('/', async (req, res) => {
     merged = Array.from(m.values());
     merged = merged.filter(r => !/\bhygienist\b/i.test(r.specialty || ""));
 
-    // 1. Batch fetch cached coordinates from Supabase to avoid individual database queries
-    const addressKeys = merged.map(r => `${r.address}|${r.city}|${r.state}|${r.zip}`.toLowerCase().trim());
-    const dbCache = await getCachedGeocodes(addressKeys);
+    // Take only the requested page size from the merged/deduped results
+    const pageResults = merged.slice(0, limit);
 
-    // Apply cached coordinates to dentists list
-    merged.forEach(r => {
-      const key = `${r.address}|${r.city}|${r.state}|${r.zip}`.toLowerCase().trim();
-      if (dbCache.has(key)) {
-        const coords = dbCache.get(key);
-        if (coords) {
-          r.latitude = coords.lat;
-          r.longitude = coords.lng;
-        }
-      }
-    });
-
-    // 2. Batch fetch shadow stats from Supabase
-    const npiList = merged.map(r => r.npi);
+    // 1. Batch fetch shadow stats from Supabase
+    const npiList = pageResults.map(r => r.npi);
     const statsMap = await getShadowStatsForNpis(npiList);
-    merged.forEach(r => {
+    pageResults.forEach(r => {
       r.shadowStats = statsMap[r.npi] || { allowedPercentage: 0, avgRating: 0, totalReports: 0 };
     });
 
-    // 3. Determine the coordinate origin for distance calculation (Miles)
+    // 2. Determine the coordinate origin for distance calculation
     let originLat: number | null = userLat;
     let originLng: number | null = userLng;
 
@@ -342,18 +262,30 @@ dentistsRouter.get('/', async (req, res) => {
       }
     }
 
-    // 4. Calculate distances from origin if coordinates are available
-    if (originLat !== null && originLng !== null) {
-      merged.forEach(r => {
-        if (r.latitude !== null && r.longitude !== null) {
-          r.distance = calculateDistance(originLat!, originLng!, r.latitude, r.longitude);
+    // 3. Geocode all results on this page (with per-request address dedup)
+    const requestGeoDedup = new Map<string, { lat: number; lng: number } | null>();
+    for (const dentist of pageResults) {
+      const addrKey = `${dentist.address}|${dentist.city}|${dentist.state}|${dentist.zip}`.toLowerCase().trim();
+      
+      let coords: { lat: number; lng: number } | null = null;
+      if (requestGeoDedup.has(addrKey)) {
+        coords = requestGeoDedup.get(addrKey)!;
+      } else {
+        coords = await geocodeAddress(dentist.address, dentist.city, dentist.state, dentist.zip);
+        requestGeoDedup.set(addrKey, coords);
+      }
+
+      if (coords) {
+        dentist.latitude = coords.lat;
+        dentist.longitude = coords.lng;
+        if (originLat !== null && originLng !== null) {
+          dentist.distance = calculateDistance(originLat, originLng, coords.lat, coords.lng);
         }
-      });
+      }
     }
 
-    // 5. Sort results (distance is used for sorting, NOT for hard-filtering,
-    //    so pagination is consistent regardless of geocode cache state).
-    merged.sort((a, b) => {
+    // 4. Sort results
+    pageResults.sort((a, b) => {
       const distA = a.distance ?? 9999;
       const distB = b.distance ?? 9999;
 
@@ -370,29 +302,12 @@ dentistsRouter.get('/', async (req, res) => {
       }
     });
 
-    // 6. Paginate the sorted results
-    const totalResults = merged.length;
+    // 5. Calculate pagination from NPI API's result_count
+    const totalResults = npiTotalEstimate;
     const totalPages = Math.ceil(totalResults / limit);
-    const startIdx = (page - 1) * limit;
-    const pageSlice = merged.slice(startIdx, startIdx + limit);
-
-    // 7. Synchronously geocode ONLY the pageSlice items that are uncached
-    // (This guarantees the current page's map pins will render correctly)
-    for (const dentist of pageSlice) {
-      if (dentist.latitude === null || dentist.longitude === null) {
-        const coords = await geocodeAddress(dentist.address, dentist.city, dentist.state, dentist.zip);
-        if (coords) {
-          dentist.latitude = coords.lat;
-          dentist.longitude = coords.lng;
-          if (originLat !== null && originLng !== null) {
-            dentist.distance = calculateDistance(originLat, originLng, coords.lat, coords.lng);
-          }
-        }
-      }
-    }
 
     res.json({
-      results: pageSlice,
+      results: pageResults,
       total: totalResults,
       page,
       totalPages
