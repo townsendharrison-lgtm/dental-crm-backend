@@ -21,42 +21,117 @@ let lastGeocodeTime = 0;
 async function rateLimitNominatim(): Promise<void> {
   const now = Date.now();
   const timeSinceLast = now - lastGeocodeTime;
-  if (timeSinceLast < 1100) {
-    await new Promise(resolve => setTimeout(resolve, 1100 - timeSinceLast));
+  if (timeSinceLast < 1200) {
+    await new Promise(resolve => setTimeout(resolve, 1200 - timeSinceLast));
   }
   lastGeocodeTime = Date.now();
 }
 
-// Geocode an address via Nominatim (no caching — results are deduped per-request in the route handler)
-async function geocodeAddress(street: string, city: string, state: string, zip: string): Promise<{ lat: number; lng: number } | null> {
-  const queries: string[] = [];
-  if (street || city || state || zip) {
-    queries.push([street, city, state, zip].filter(Boolean).join(', '));
-    queries.push([city, state, zip].filter(Boolean).join(', '));
-    queries.push([zip, state].filter(Boolean).join(', '));
-  }
+// Sanitize NPI addresses so Nominatim can match them
+function sanitizeStreet(raw: string): string {
+  let s = raw.trim();
+  // Remove PO Box lines (Nominatim can't resolve them)
+  s = s.replace(/\bP\.?\s*O\.?\s*BOX\s*\d*/gi, '').trim();
+  // Remove C/O, ATTN, % prefixes
+  s = s.replace(/^(C\/O|ATTN:?|%)\s*/i, '').trim();
+  // Remove suite / floor / room suffixes (they confuse Nominatim)
+  s = s.replace(/\b(STE|SUITE|FL|FLOOR|RM|ROOM|UNIT|APT|#)\s*[\w-]*$/i, '').trim();
+  // Collapse leftover commas / whitespace
+  s = s.replace(/,\s*,/g, ',').replace(/,\s*$/, '').trim();
+  return s;
+}
 
-  for (const q of queries) {
+// Core Nominatim request with retry on 429 / timeout
+async function nominatimRequest(url: string, label: string, retries = 2): Promise<{ lat: number; lng: number } | null> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       await rateLimitNominatim();
-      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1&countrycodes=us`;
       const r = await fetch(url, {
         headers: { 'User-Agent': 'DentalSchoolGuideCRM/1.0' },
+        signal: AbortSignal.timeout(8000),
       });
-      
-      if (!r.ok) {
-        console.warn(`Nominatim returned status ${r.status} for query: ${q}`);
+
+      if (r.status === 429) {
+        console.warn(`Nominatim 429 on attempt ${attempt + 1} for: ${label}`);
+        await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
         continue;
       }
-      
+      if (!r.ok) {
+        console.warn(`Nominatim ${r.status} for: ${label}`);
+        return null;
+      }
+
       const data: any = await r.json();
       if (data && data.length > 0) {
-        return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+        const lat = parseFloat(data[0].lat);
+        const lng = parseFloat(data[0].lon);
+        if (!isNaN(lat) && !isNaN(lng)) return { lat, lng };
       }
-    } catch (err) {
-      console.error(`Nominatim query error for "${q}":`, err);
+      return null; // empty result set — don't retry
+    } catch (err: any) {
+      if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+        console.warn(`Nominatim timeout attempt ${attempt + 1} for: ${label}`);
+        if (attempt < retries) continue;
+      }
+      console.error(`Nominatim error for "${label}":`, err);
+      return null;
     }
   }
+  return null;
+}
+
+// Structured Nominatim query (street/city/state/postalcode as separate params — far more reliable)
+function buildStructuredUrl(street?: string, city?: string, state?: string, postalcode?: string): string {
+  const params = new URLSearchParams({ format: 'json', limit: '1', countrycodes: 'us' });
+  if (street) params.set('street', street);
+  if (city) params.set('city', city);
+  if (state) params.set('state', state);
+  if (postalcode) params.set('postalcode', postalcode);
+  return `https://nominatim.openstreetmap.org/search?${params.toString()}`;
+}
+
+// Free-text Nominatim query (fallback)
+function buildFreeTextUrl(q: string): string {
+  return `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1&countrycodes=us`;
+}
+
+// Geocode an address via Nominatim using a structured → free-text fallback chain.
+// Results are deduped per-request in the route handler.
+async function geocodeAddress(street: string, city: string, state: string, zip: string): Promise<{ lat: number; lng: number } | null> {
+  const cleanStreet = sanitizeStreet(street);
+
+  // Skip addresses that are purely PO Boxes (sanitizeStreet would have emptied them)
+  const hasMeaningfulStreet = cleanStreet.length > 0;
+
+  // --- Strategy 1: Structured query with full address ---
+  if (hasMeaningfulStreet && (city || state || zip)) {
+    const url = buildStructuredUrl(cleanStreet, city, state, zip);
+    const result = await nominatimRequest(url, `structured(${cleanStreet}, ${city}, ${state}, ${zip})`);
+    if (result) return result;
+  }
+
+  // --- Strategy 2: Structured query without street (city/state/zip only) ---
+  if (city || state || zip) {
+    const url = buildStructuredUrl(undefined, city, state, zip);
+    const result = await nominatimRequest(url, `structured(city=${city}, state=${state}, zip=${zip})`);
+    if (result) return result;
+  }
+
+  // --- Strategy 3: Free-text zip code (Nominatim resolves US zips well) ---
+  if (zip) {
+    const url = buildFreeTextUrl(zip);
+    const result = await nominatimRequest(url, `freetext(${zip})`);
+    if (result) return result;
+  }
+
+  // --- Strategy 4: Free-text city + state ---
+  if (city && state) {
+    const url = buildFreeTextUrl(`${city}, ${state}`);
+    const result = await nominatimRequest(url, `freetext(${city}, ${state})`);
+    if (result) return result;
+  }
+
+  console.warn(`Geocoding failed — street: "${street}", city: "${city}", state: "${state}", zip: "${zip}"`);
   return null;
 }
 
@@ -247,14 +322,9 @@ dentistsRouter.get('/', async (req, res) => {
     let originLng: number | null = userLng;
 
     if (originLat === null || originLng === null) {
-      const parts: string[] = [];
-      if (city) parts.push(city as string);
-      if (state) parts.push(state as string);
-      if (zip) parts.push(zip as string);
-
-      if (parts.length > 0) {
-        const searchAddr = parts.join(', ');
-        const searchOrigin = await geocodeAddress('', '', '', searchAddr);
+      const hasLocation = city || state || zip;
+      if (hasLocation) {
+        const searchOrigin = await geocodeAddress('', (city as string) || '', (state as string) || '', (zip as string) || '');
         if (searchOrigin) {
           originLat = searchOrigin.lat;
           originLng = searchOrigin.lng;
