@@ -80,6 +80,71 @@ router.post('/complete-invitation', async (req: Request, res: Response) => {
       .eq('email', authUser.email!)
       .eq('status', 'PENDING');
 
+    // Trigger welcome message automation templates binding
+    try {
+      const { data: config } = await supabaseAdmin
+        .from('admin_settings')
+        .select('welcome_template_student, welcome_template_mentor')
+        .eq('id', 1)
+        .maybeSingle();
+
+      const { data: adminUser } = await supabaseAdmin
+        .from('users')
+        .select('id, name')
+        .eq('role', 'ADMIN')
+        .limit(1)
+        .maybeSingle();
+
+      if (adminUser) {
+        let welcomeText = '';
+        if (role === 'STUDENT' && config?.welcome_template_student) {
+          welcomeText = config.welcome_template_student
+            .replace(/\{\{\s*student_name\s*\}\}/g, name)
+            .replace(/\{\{\s*name\s*\}\}/g, name);
+        } else if (role === 'MENTOR' && config?.welcome_template_mentor) {
+          welcomeText = config.welcome_template_mentor
+            .replace(/\{\{\s*mentor_name\s*\}\}/g, name)
+            .replace(/\{\{\s*name\s*\}\}/g, name);
+        }
+
+        if (welcomeText) {
+          // Create conversation between new user and first admin
+          const { data: newConv, error: cErr } = await supabaseAdmin
+            .from('conversations')
+            .insert({
+              participant_ids: [authUser.id, adminUser.id],
+              is_group: false
+            })
+            .select()
+            .single();
+
+          if (!cErr && newConv) {
+            // Post message
+            await supabaseAdmin.from('messages').insert({
+              conversation_id: newConv.id,
+              sender_id: adminUser.id,
+              text: welcomeText,
+              read_by: [adminUser.id]
+            });
+
+            // Create notification for the new user
+            await supabaseAdmin.from('notifications').insert({
+              user_id: authUser.id,
+              title: `👋 Welcome to Dental CRM`,
+              message: welcomeText.substring(0, 80),
+              type: 'INFO',
+              category: 'NEW_MESSAGE',
+              related_id: newConv.id,
+              is_read: false,
+              created_by: adminUser.id
+            });
+          }
+        }
+      }
+    } catch (welcomeErr) {
+      console.error('Welcome automation message dispatch error:', welcomeErr);
+    }
+
     // Sign in the user to get a session
     const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
       email: authUser.email!,

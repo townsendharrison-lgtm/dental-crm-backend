@@ -32,6 +32,7 @@ import { adminSettingsRouter } from './routes/adminSettings.js';
 import { researchCasesRouter } from './routes/researchCases.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { startReminderCron } from './services/lorReminderCron.js';
+import { supabaseAdmin } from './config/supabase.js';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -65,6 +66,46 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
+
+// Maintenance Mode Guard Middleware
+app.use(async (req, res, next) => {
+  // Allow safe reading requests, public routes, auth routes, and health checks
+  if (
+    req.method === 'GET' ||
+    req.path.startsWith('/api/auth') ||
+    req.path.startsWith('/api/public') ||
+    req.path === '/health'
+  ) {
+    return next();
+  }
+
+  try {
+    const { data: config } = await supabaseAdmin
+      .from('admin_settings')
+      .select('maintenance_mode')
+      .eq('id', 1)
+      .maybeSingle();
+
+    if (config?.maintenance_mode) {
+      // Decode user role from token manually to verify if Admin
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.substring(7);
+        const { data: { user } } = await supabaseAdmin.auth.getUser(token);
+        const role = user?.user_metadata?.role || 'STUDENT';
+        if (role === 'ADMIN') {
+          return next(); // Admins bypass maintenance mode
+        }
+      }
+      return res.status(503).json({
+        error: 'The platform is currently undergoing scheduled maintenance. Write operations are temporarily disabled.'
+      });
+    }
+  } catch (err) {
+    console.error('Maintenance mode verification error:', err);
+  }
+  next();
+});
 
 // Routes
 app.use('/api/auth', authLimiter, authRouter);

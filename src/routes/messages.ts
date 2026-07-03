@@ -372,6 +372,73 @@ router.post('/:id/messages', async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // 4. Trigger Auto-Reply if sender is a STUDENT
+    if (req.user!.role === 'STUDENT' && !conv.is_group && recipients.length === 1) {
+      try {
+        const { data: config } = await supabaseAdmin
+          .from('admin_settings')
+          .select('auto_reply_enabled, auto_reply_message')
+          .eq('id', 1)
+          .maybeSingle();
+
+        if (config?.auto_reply_enabled && config?.auto_reply_message) {
+          const mentorId = recipients[0];
+          const autoReplyText = config.auto_reply_message;
+
+          // Check role of the recipient to verify it is staff/mentor
+          const { data: otherUser } = await supabaseAdmin
+            .from('users')
+            .select('role, name')
+            .eq('id', mentorId)
+            .maybeSingle();
+
+          if (otherUser && (otherUser.role === 'MENTOR' || otherUser.role === 'ADMIN' || otherUser.role === 'MENTOR_MANAGER')) {
+            // Check if the last message from this advisor (mentorId) in this conversation was within the last 24 hours
+            const { data: lastMessages } = await supabaseAdmin
+              .from('messages')
+              .select('created_at')
+              .eq('conversation_id', id)
+              .eq('sender_id', mentorId)
+              .order('created_at', { ascending: false })
+              .limit(1);
+
+            let shouldSendAutoReply = true;
+            if (lastMessages && lastMessages.length > 0) {
+              const lastMessageTime = new Date(lastMessages[0].created_at).getTime();
+              const twentyFourHoursAgo = Date.now() - 24 * 60 * 60 * 1000;
+              if (lastMessageTime > twentyFourHoursAgo) {
+                shouldSendAutoReply = false;
+              }
+            }
+
+            if (shouldSendAutoReply) {
+              // Post auto-reply message
+              await supabaseAdmin.from('messages').insert({
+                conversation_id: id,
+                sender_id: mentorId,
+                text: autoReplyText,
+                read_by: [mentorId]
+              });
+
+              // Create notification for student
+              await supabaseAdmin.from('notifications').insert({
+                user_id: userId,
+                title: `💬 Auto-Reply from ${otherUser.name || 'Advisor'}`,
+                message: autoReplyText.substring(0, 80),
+                type: 'INFO',
+                category: 'NEW_MESSAGE',
+                related_id: id,
+                is_read: false,
+                created_by: mentorId
+              });
+            }
+          }
+        }
+      } catch (arErr) {
+        console.error('Auto-reply trigger error:', arErr);
+      }
+    }
+
     res.status(201).json(message);
   } catch (error: any) {
     console.error('Send message error:', error);
