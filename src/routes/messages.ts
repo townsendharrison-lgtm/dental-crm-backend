@@ -29,8 +29,18 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       return res.json({ conversations: [] });
     }
 
+    // Filter out conversations that the user has deleted/hidden
+    const activeConversations = conversations.filter(c => {
+      const deletedBy = c.deleted_by || [];
+      return !deletedBy.includes(userId);
+    });
+
+    if (activeConversations.length === 0) {
+      return res.json({ conversations: [] });
+    }
+
     // 2. Fetch all participant users profiles
-    const allParticipantIds = Array.from(new Set(conversations.flatMap(c => c.participant_ids)));
+    const allParticipantIds = Array.from(new Set(activeConversations.flatMap(c => c.participant_ids)));
     const { data: users } = await supabaseAdmin
       .from('users')
       .select('id, name, email, avatar, role')
@@ -43,7 +53,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     // 3. Resolve last message & unread count for each conversation
     const conversationsWithDetails = await Promise.all(
-      conversations.map(async (conv) => {
+      activeConversations.map(async (conv) => {
         // Resolve participants objects
         const resolvedParticipants = conv.participant_ids
           .map((pId: string) => usersMap.get(pId))
@@ -77,7 +87,17 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       })
     );
 
-    res.json({ conversations: conversationsWithDetails });
+    // Sort: pinned first, then updated_at descending
+    const sortedConversations = conversationsWithDetails.sort((a, b) => {
+      const aPinned = (a.pinned_by || []).includes(userId) ? 1 : 0;
+      const bPinned = (b.pinned_by || []).includes(userId) ? 1 : 0;
+      if (aPinned !== bPinned) {
+        return bPinned - aPinned;
+      }
+      return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+    });
+
+    res.json({ conversations: sortedConversations });
   } catch (error: any) {
     console.error('Fetch conversations error:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
@@ -496,6 +516,172 @@ router.post('/:id/read', async (req: AuthRequest, res: Response) => {
     res.json({ success: true });
   } catch (error: any) {
     console.error('Mark read error:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// ─── POST /api/conversations/:id/pin ──────────────────────────────────
+router.post('/:id/pin', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { id } = req.params;
+
+    const { data: conv, error: convErr } = await supabaseAdmin
+      .from('conversations')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (convErr || !conv) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    if (!conv.participant_ids.includes(userId)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const pinnedBy = conv.pinned_by || [];
+    if (!pinnedBy.includes(userId)) {
+      const { error: updateErr } = await supabaseAdmin
+        .from('conversations')
+        .update({
+          pinned_by: [...pinnedBy, userId]
+        })
+        .eq('id', id);
+
+      if (updateErr) {
+        return res.status(400).json({ error: updateErr.message });
+      }
+    }
+
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// ─── POST /api/conversations/:id/unpin ────────────────────────────────
+router.post('/:id/unpin', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { id } = req.params;
+
+    const { data: conv, error: convErr } = await supabaseAdmin
+      .from('conversations')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (convErr || !conv) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    if (!conv.participant_ids.includes(userId)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const pinnedBy = conv.pinned_by || [];
+    if (pinnedBy.includes(userId)) {
+      const { error: updateErr } = await supabaseAdmin
+        .from('conversations')
+        .update({
+          pinned_by: pinnedBy.filter((uid: string) => uid !== userId)
+        })
+        .eq('id', id);
+
+      if (updateErr) {
+        return res.status(400).json({ error: updateErr.message });
+      }
+    }
+
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// ─── DELETE /api/conversations/:id ────────────────────────────────────
+router.delete('/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { id } = req.params;
+
+    const { data: conv, error: convErr } = await supabaseAdmin
+      .from('conversations')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (convErr || !conv) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    if (!conv.participant_ids.includes(userId)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const deletedBy = conv.deleted_by || [];
+    if (!deletedBy.includes(userId)) {
+      const { error: updateErr } = await supabaseAdmin
+        .from('conversations')
+        .update({
+          deleted_by: [...deletedBy, userId]
+        })
+        .eq('id', id);
+
+      if (updateErr) {
+        return res.status(400).json({ error: updateErr.message });
+      }
+    }
+
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// ─── PUT /api/conversations/:id/rename ────────────────────────────────
+router.put('/:id/rename', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { id } = req.params;
+    const { name } = req.body;
+
+    if (!name || name.trim() === '') {
+      return res.status(400).json({ error: 'New name is required' });
+    }
+
+    const { data: conv, error: convErr } = await supabaseAdmin
+      .from('conversations')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (convErr || !conv) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    if (!conv.participant_ids.includes(userId)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    if (!conv.is_group) {
+      return res.status(400).json({ error: 'Only group chats can be renamed' });
+    }
+
+    const { error: updateErr } = await supabaseAdmin
+      .from('conversations')
+      .update({
+        name: name.trim()
+      })
+      .eq('id', id);
+
+    if (updateErr) {
+      return res.status(400).json({ error: updateErr.message });
+    }
+
+    res.json({ success: true });
+  } catch (error: any) {
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
