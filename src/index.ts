@@ -31,6 +31,7 @@ import { resourcesRouter } from './routes/resources.js';
 import { optimizationPlansRouter } from './routes/optimizationPlans.js';
 import { adminSettingsRouter } from './routes/adminSettings.js';
 import { researchCasesRouter } from './routes/researchCases.js';
+import { coursesRouter } from './routes/courses.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { startReminderCron } from './services/lorReminderCron.js';
 import { startWorkflowCron } from './services/workflowCron.js';
@@ -138,6 +139,7 @@ app.use('/api/resources', resourcesRouter);
 app.use('/api/optimization-plans', optimizationPlansRouter);
 app.use('/api/admin-settings', adminSettingsRouter);
 app.use('/api/research-cases', researchCasesRouter);
+app.use('/api/courses', coursesRouter);
 
 // Health check
 app.get('/health', (req, res) => {
