@@ -115,6 +115,27 @@ router.get('/', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), async (req: 
   }
 });
 
+// GET /api/mentors/assignments - List student↔mentor assignment history
+// Access: Admins and Mentor Managers
+// IMPORTANT: must be registered before /:id so "assignments" is not treated as an id
+router.get('/assignments', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('student_assignments')
+      .select('*')
+      .order('assigned_at', { ascending: false });
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    res.json({ assignments: data || [] });
+  } catch (error: any) {
+    console.error('Error fetching assignments:', error);
+    res.status(500).json({ error: error.message || 'Server error fetching assignments' });
+  }
+});
+
 // GET /api/mentors/:id - Fetch single mentor
 router.get('/:id', authenticate, async (req: AuthRequest, res: Response) => {
   try {

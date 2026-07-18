@@ -27,11 +27,13 @@ import { surveysRouter } from './routes/surveys.js';
 import { badgesRouter } from './routes/badges.js';
 import { workflowsRouter } from './routes/workflows.js';
 import { popupsRouter } from './routes/popups.js';
+import { resourcesRouter } from './routes/resources.js';
 import { optimizationPlansRouter } from './routes/optimizationPlans.js';
 import { adminSettingsRouter } from './routes/adminSettings.js';
 import { researchCasesRouter } from './routes/researchCases.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { startReminderCron } from './services/lorReminderCron.js';
+import { startWorkflowCron } from './services/workflowCron.js';
 import { supabaseAdmin } from './config/supabase.js';
 
 const app = express();
@@ -132,6 +134,7 @@ app.use('/api/surveys', surveysRouter);
 app.use('/api/badges', badgesRouter);
 app.use('/api/workflows', workflowsRouter);
 app.use('/api/popups', popupsRouter);
+app.use('/api/resources', resourcesRouter);
 app.use('/api/optimization-plans', optimizationPlansRouter);
 app.use('/api/admin-settings', adminSettingsRouter);
 app.use('/api/research-cases', researchCasesRouter);
@@ -149,4 +152,6 @@ app.listen(PORT, () => {
   console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
   // Start automated LOR reminder cron
   startReminderCron();
+  // Start workflow queue processor
+  startWorkflowCron();
 });

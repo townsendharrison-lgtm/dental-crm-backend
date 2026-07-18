@@ -12,31 +12,28 @@ router.use(authenticate);
 router.get('/active', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const role = req.user!.role;
+    const role = String(req.user!.role || '').toUpperCase();
     const now = new Date().toISOString();
 
     // Query active campaigns within schedule bounds
-    let query = supabaseAdmin
+    const { data: popups, error } = await supabaseAdmin
       .from('popup_advertisements')
       .select('*')
       .eq('is_active', true)
       .lte('start_date', now)
       .gte('end_date', now);
 
-    // Apply role filter (unless Admin/Manager)
-    if (role !== 'ADMIN' && role !== 'MENTOR_MANAGER') {
-      query = query.or(`target_role.eq.BOTH,target_role.eq.${role}`);
-    }
-
-    const { data: popups, error } = await query;
     if (error) {
       return res.status(500).json({ error: error.message });
     }
 
-    // Filter out campaigns already dismissed by the caller user
-    const activeNonDismissed = (popups || []).filter(
-      (popup: any) => !(popup.dismissed_by || []).includes(userId)
-    );
+    // Always enforce audience: BOTH or exact role match (never show STUDENT ads to MENTOR, etc.)
+    const activeNonDismissed = (popups || []).filter((popup: any) => {
+      const target = String(popup.target_role || 'BOTH').toUpperCase();
+      const matchesRole = target === 'BOTH' || target === role;
+      const notDismissed = !(popup.dismissed_by || []).includes(userId);
+      return matchesRole && notDismissed;
+    });
 
     res.json({ popups: activeNonDismissed });
   } catch (error: any) {

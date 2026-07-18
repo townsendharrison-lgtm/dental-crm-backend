@@ -31,8 +31,30 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     }
 
     const list = surveys || [];
+    const userId = req.user!.id;
 
-    // Exact per-survey counts + latest submitted_at (avoids nested FK / row-limit issues)
+    // Surveys the current user has already completed
+    const answeredIds = new Set<string>();
+    if (list.length > 0) {
+      const { data: myResponses, error: myRespErr } = await supabaseAdmin
+        .from('survey_responses')
+        .select('survey_id')
+        .eq('user_id', userId)
+        .in(
+          'survey_id',
+          list.map((s: { id: string }) => s.id),
+        );
+
+      if (myRespErr) {
+        console.error('User survey responses lookup error:', myRespErr.message);
+      } else {
+        for (const row of myResponses || []) {
+          answeredIds.add((row as { survey_id: string }).survey_id);
+        }
+      }
+    }
+
+    // Exact per-survey counts + latest submitted_at (staff cards; safe for all roles)
     const statsEntries = await Promise.all(
       list.map(async (s: { id: string }) => {
         const [{ count, error: countErr }, { data: latest, error: latestErr }] =
@@ -71,12 +93,15 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     res.json({
       surveys: list.map((s: { id: string }) => {
         const meta = stats[s.id] || { count: 0, lastResponseAt: null };
+        const hasResponded = answeredIds.has(s.id);
         return {
           ...s,
           response_count: meta.count,
           responseCount: meta.count,
           last_response_at: meta.lastResponseAt,
           lastResponseAt: meta.lastResponseAt,
+          has_responded: hasResponded,
+          hasResponded,
         };
       }),
     });

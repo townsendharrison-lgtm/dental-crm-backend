@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { supabaseAdmin } from '../config/supabase.js';
 import { authenticate, AuthRequest } from '../middleware/auth.js';
+import { handleApplicationStatusWorkflows } from '../services/workflowEngine.js';
 
 const router = Router();
 
@@ -190,6 +191,15 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: error.message });
     }
 
+    // Fire workflow automations for the initial status
+    void handleApplicationStatusWorkflows({
+      studentId: targetStudentId,
+      schoolId,
+      previousStatus: null,
+      newStatus: status,
+      source: 'applications',
+    });
+
     res.status(201).json(newApp);
   } catch (error: any) {
     console.error('Create application error:', error);
@@ -250,6 +260,16 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 
     if (error) {
       return res.status(400).json({ error: error.message });
+    }
+
+    if (updates.status !== undefined && updates.status !== existing.status) {
+      void handleApplicationStatusWorkflows({
+        studentId: existing.student_id,
+        schoolId: existing.school_id,
+        previousStatus: existing.status,
+        newStatus: updates.status,
+        source: 'applications',
+      });
     }
 
     res.json(updated);
