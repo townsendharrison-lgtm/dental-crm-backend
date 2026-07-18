@@ -136,6 +136,26 @@ router.get('/assignments', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), a
   }
 });
 
+// GET /api/mentors/assignments/pending - Current mentor's pending proposals
+// Must be registered before /:id
+router.get('/assignments/pending', authenticate, authorize('MENTOR'), async (req: AuthRequest, res: Response) => {
+  try {
+    const mentorId = req.user!.id;
+    const { data, error } = await supabaseAdmin
+      .from('student_assignments')
+      .select('*')
+      .eq('mentor_id', mentorId)
+      .eq('status', 'PENDING')
+      .order('assigned_at', { ascending: false });
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ assignments: data || [] });
+  } catch (error: any) {
+    console.error('Error fetching pending assignments:', error);
+    res.status(500).json({ error: error.message || 'Server error' });
+  }
+});
+
 // GET /api/mentors/:id - Fetch single mentor
 router.get('/:id', authenticate, async (req: AuthRequest, res: Response) => {
   try {
@@ -307,7 +327,7 @@ router.delete('/:id', authenticate, authorize('ADMIN'), async (req: AuthRequest,
   }
 });
 
-// POST /api/mentors/assign - Assign student to mentor
+// POST /api/mentors/assign - Propose student→mentor assignment (PENDING until mentor accepts)
 // Access: Admins and Mentor Managers
 router.post('/assign', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res: Response) => {
   try {
@@ -316,11 +336,13 @@ router.post('/assign', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), async
     if (!studentId) {
       return res.status(400).json({ error: 'studentId is required' });
     }
+    if (!mentorId) {
+      return res.status(400).json({ error: 'mentorId is required' });
+    }
 
-    // Verify student user exists
     const { data: studentUser, error: sErr } = await supabaseAdmin
       .from('users')
-      .select('id')
+      .select('id, name')
       .eq('id', studentId)
       .eq('role', 'STUDENT')
       .maybeSingle();
@@ -329,54 +351,87 @@ router.post('/assign', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), async
       return res.status(404).json({ error: 'Student user not found' });
     }
 
-    // Verify mentor user exists if mentorId is provided (unassigning is done by setting mentorId to null)
-    if (mentorId) {
-      const { data: mentorUser, error: mErr } = await supabaseAdmin
-        .from('users')
-        .select('id')
-        .eq('id', mentorId)
-        .eq('role', 'MENTOR')
-        .maybeSingle();
+    const { data: mentorUser, error: mErr } = await supabaseAdmin
+      .from('users')
+      .select('id, name')
+      .eq('id', mentorId)
+      .eq('role', 'MENTOR')
+      .maybeSingle();
 
-      if (mErr || !mentorUser) {
-        return res.status(404).json({ error: 'Mentor user not found' });
-      }
+    if (mErr || !mentorUser) {
+      return res.status(404).json({ error: 'Mentor user not found' });
     }
 
-    // Update student profile with new mentor_id
-    const { error: updateErr } = await supabaseAdmin
+    // Do NOT link student yet — wait for mentor acceptance.
+    // Keep student unassigned (or clear mentor if somehow set).
+    await supabaseAdmin
       .from('student_profiles')
-      .update({ mentor_id: mentorId || null, updated_at: new Date().toISOString() })
+      .update({ mentor_id: null, updated_at: new Date().toISOString() })
       .eq('id', studentId);
 
-    if (updateErr) {
-      return res.status(500).json({ error: updateErr.message });
-    }
-
-    // Log the assignment event
-    const { error: logErr } = await supabaseAdmin
+    // Upsert pending assignment (one pending row per student)
+    const { data: existingPending } = await supabaseAdmin
       .from('student_assignments')
-      .insert({
-        student_id: studentId,
-        mentor_id: mentorId || null,
-        status: 'ACCEPTED', // Admin assignment is automatically accepted
-        assigned_at: new Date().toISOString(),
-        accepted_at: mentorId ? new Date().toISOString() : null,
-        welcome_message: welcomeMessage || null
-      });
+      .select('id')
+      .eq('student_id', studentId)
+      .eq('status', 'PENDING')
+      .maybeSingle();
 
-    if (logErr) {
-      console.error('Failed to log student assignment history:', logErr);
+    let assignment;
+    if (existingPending) {
+      const { data, error } = await supabaseAdmin
+        .from('student_assignments')
+        .update({
+          mentor_id: mentorId,
+          assigned_at: new Date().toISOString(),
+          welcome_message: welcomeMessage || null,
+        })
+        .eq('id', existingPending.id)
+        .select()
+        .single();
+      if (error) return res.status(500).json({ error: error.message });
+      assignment = data;
+    } else {
+      const { data, error } = await supabaseAdmin
+        .from('student_assignments')
+        .insert({
+          student_id: studentId,
+          mentor_id: mentorId,
+          status: 'PENDING',
+          assigned_at: new Date().toISOString(),
+          welcome_message: welcomeMessage || null,
+        })
+        .select()
+        .single();
+      if (error) return res.status(500).json({ error: error.message });
+      assignment = data;
     }
 
-    res.json({ message: 'Mentor assigned successfully', studentId, mentorId });
+    // Notify the mentor
+    await supabaseAdmin.from('notifications').insert({
+      user_id: mentorId,
+      title: 'New Student Assignment',
+      message: `You have been assigned a new student: ${studentUser.name || 'Student'}. Please accept the assignment.`,
+      type: 'URGENT',
+      category: 'ASSIGNMENT',
+      related_id: assignment.id,
+      is_read: false,
+      created_by: req.user!.id,
+    });
+
+    res.json({
+      message: 'Assignment proposed — waiting for mentor acceptance',
+      studentId,
+      mentorId,
+      assignment,
+    });
   } catch (error: any) {
     console.error('Error assigning mentor:', error);
     res.status(500).json({ error: error.message || 'Server error assigning mentor' });
   }
 });
 
-// POST /api/mentors/transfer - Transfer student to a different mentor
+// POST /api/mentors/transfer - Transfer student (PENDING until new mentor accepts)
 // Access: Admins and Mentor Managers
 router.post('/transfer', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res: Response) => {
   try {
@@ -385,8 +440,10 @@ router.post('/transfer', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), asy
     if (!studentId) {
       return res.status(400).json({ error: 'studentId is required' });
     }
+    if (!newMentorId) {
+      return res.status(400).json({ error: 'newMentorId is required' });
+    }
 
-    // 1. Verify student exists
     const { data: studentProfile, error: spErr } = await supabaseAdmin
       .from('student_profiles')
       .select('mentor_id')
@@ -399,68 +456,284 @@ router.post('/transfer', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), asy
 
     const oldMentorId = studentProfile.mentor_id;
 
-    // 2. Verify new mentor user exists if provided
-    if (newMentorId) {
-      const { data: mentorUser, error: mErr } = await supabaseAdmin
-        .from('users')
-        .select('id')
-        .eq('id', newMentorId)
-        .eq('role', 'MENTOR')
-        .maybeSingle();
+    const { data: mentorUser, error: mErr } = await supabaseAdmin
+      .from('users')
+      .select('id, name')
+      .eq('id', newMentorId)
+      .eq('role', 'MENTOR')
+      .maybeSingle();
 
-      if (mErr || !mentorUser) {
-        return res.status(404).json({ error: 'New mentor user not found' });
-      }
+    if (mErr || !mentorUser) {
+      return res.status(404).json({ error: 'New mentor user not found' });
     }
 
-    // 3. Mark old active assignments as TRANSFERRED
+    const { data: studentUser } = await supabaseAdmin
+      .from('users')
+      .select('name')
+      .eq('id', studentId)
+      .maybeSingle();
+
+    // Mark old accepted assignment as TRANSFERRED
     if (oldMentorId) {
       await supabaseAdmin
         .from('student_assignments')
         .update({
           status: 'TRANSFERRED',
-          transferred_at: new Date().toISOString()
+          transferred_at: new Date().toISOString(),
         })
         .eq('student_id', studentId)
         .eq('mentor_id', oldMentorId)
         .eq('status', 'ACCEPTED');
     }
 
-    // 4. Update student profile
+    // Unlink student until new mentor accepts
     const { error: updateErr } = await supabaseAdmin
       .from('student_profiles')
-      .update({ mentor_id: newMentorId || null, updated_at: new Date().toISOString() })
+      .update({ mentor_id: null, updated_at: new Date().toISOString() })
       .eq('id', studentId);
 
     if (updateErr) {
       return res.status(500).json({ error: updateErr.message });
     }
 
-    // 5. Create new assignment row
-    const { error: logErr } = await supabaseAdmin
+    // Replace any existing pending with the transfer target
+    await supabaseAdmin
+      .from('student_assignments')
+      .delete()
+      .eq('student_id', studentId)
+      .eq('status', 'PENDING');
+
+    const { data: assignment, error: logErr } = await supabaseAdmin
       .from('student_assignments')
       .insert({
         student_id: studentId,
-        mentor_id: newMentorId || null,
-        status: 'ACCEPTED',
+        mentor_id: newMentorId,
+        status: 'PENDING',
         assigned_at: new Date().toISOString(),
-        accepted_at: newMentorId ? new Date().toISOString() : null,
-        welcome_message: note || `Transferred from previous mentor.`
-      });
+        welcome_message: note || 'Transferred from previous mentor.',
+      })
+      .select()
+      .single();
 
     if (logErr) {
-      console.error('Failed to log student transfer history:', logErr);
+      return res.status(500).json({ error: logErr.message });
     }
 
+    await supabaseAdmin.from('notifications').insert({
+      user_id: newMentorId,
+      title: 'New Student Transfer Request',
+      message: `${studentUser?.name || 'A student'} has been transferred to you. Please accept the assignment.`,
+      type: 'URGENT',
+      category: 'ASSIGNMENT',
+      related_id: assignment.id,
+      is_read: false,
+      created_by: req.user!.id,
+    });
+
     res.json({
-      message: 'Student transferred successfully',
+      message: 'Transfer initiated — waiting for mentor acceptance',
       studentId,
       oldMentorId,
-      newMentorId
+      newMentorId,
+      assignment,
     });
   } catch (error: any) {
     console.error('Error transferring student:', error);
     res.status(500).json({ error: error.message || 'Server error transferring student' });
+  }
+});
+
+// POST /api/mentors/unassign - Remove mentor from student (no replacement)
+router.post('/unassign', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { studentId } = req.body as { studentId?: string };
+
+    if (!studentId) {
+      return res.status(400).json({ error: 'studentId is required' });
+    }
+
+    const { data: studentProfile, error: spErr } = await supabaseAdmin
+      .from('student_profiles')
+      .select('mentor_id')
+      .eq('id', studentId)
+      .maybeSingle();
+
+    if (spErr || !studentProfile) {
+      return res.status(404).json({ error: 'Student profile not found' });
+    }
+
+    const oldMentorId = studentProfile.mentor_id;
+
+    // Close any accepted assignment history
+    if (oldMentorId) {
+      await supabaseAdmin
+        .from('student_assignments')
+        .update({
+          status: 'TRANSFERRED',
+          transferred_at: new Date().toISOString(),
+        })
+        .eq('student_id', studentId)
+        .eq('mentor_id', oldMentorId)
+        .eq('status', 'ACCEPTED');
+    }
+
+    // Cancel pending proposals for this student
+    await supabaseAdmin
+      .from('student_assignments')
+      .update({ status: 'DECLINED' })
+      .eq('student_id', studentId)
+      .eq('status', 'PENDING');
+
+    const { error: updateErr } = await supabaseAdmin
+      .from('student_profiles')
+      .update({ mentor_id: null, updated_at: new Date().toISOString() })
+      .eq('id', studentId);
+
+    if (updateErr) {
+      return res.status(500).json({ error: updateErr.message });
+    }
+
+    res.json({
+      message: 'Student unassigned successfully',
+      studentId,
+      oldMentorId,
+    });
+  } catch (error: any) {
+    console.error('Error unassigning student:', error);
+    res.status(500).json({ error: error.message || 'Server error unassigning student' });
+  }
+});
+
+// POST /api/mentors/assignments/:assignmentId/accept
+router.post('/assignments/:assignmentId/accept', authenticate, authorize('MENTOR', 'ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { assignmentId } = req.params;
+    const { availableTimes, welcomeMessage } = req.body as {
+      availableTimes?: string[];
+      welcomeMessage?: string;
+    };
+    const requesterId = req.user!.id;
+    const requesterRole = req.user!.role;
+
+    const { data: assignment, error: aErr } = await supabaseAdmin
+      .from('student_assignments')
+      .select('*')
+      .eq('id', assignmentId)
+      .maybeSingle();
+
+    if (aErr || !assignment) {
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+    if (assignment.status !== 'PENDING') {
+      return res.status(400).json({ error: 'Assignment is not pending' });
+    }
+    if (requesterRole === 'MENTOR' && assignment.mentor_id !== requesterId) {
+      return res.status(403).json({ error: 'You can only accept your own assignments' });
+    }
+    if (!assignment.mentor_id) {
+      return res.status(400).json({ error: 'Assignment has no mentor' });
+    }
+
+    const { data: updated, error: uErr } = await supabaseAdmin
+      .from('student_assignments')
+      .update({
+        status: 'ACCEPTED',
+        accepted_at: new Date().toISOString(),
+        available_times: availableTimes || [],
+        welcome_message: welcomeMessage ?? assignment.welcome_message,
+      })
+      .eq('id', assignmentId)
+      .select()
+      .single();
+
+    if (uErr) return res.status(500).json({ error: uErr.message });
+
+    const { error: linkErr } = await supabaseAdmin
+      .from('student_profiles')
+      .update({
+        mentor_id: assignment.mentor_id,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', assignment.student_id);
+
+    if (linkErr) return res.status(500).json({ error: linkErr.message });
+
+    res.json({ message: 'Assignment accepted', assignment: updated });
+  } catch (error: any) {
+    console.error('Error accepting assignment:', error);
+    res.status(500).json({ error: error.message || 'Server error accepting assignment' });
+  }
+});
+
+// POST /api/mentors/assignments/:assignmentId/decline
+router.post('/assignments/:assignmentId/decline', authenticate, authorize('MENTOR', 'ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { assignmentId } = req.params;
+    const requesterId = req.user!.id;
+    const requesterRole = req.user!.role;
+
+    const { data: assignment, error: aErr } = await supabaseAdmin
+      .from('student_assignments')
+      .select('*')
+      .eq('id', assignmentId)
+      .maybeSingle();
+
+    if (aErr || !assignment) {
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+    if (assignment.status !== 'PENDING') {
+      return res.status(400).json({ error: 'Assignment is not pending' });
+    }
+    if (requesterRole === 'MENTOR' && assignment.mentor_id !== requesterId) {
+      return res.status(403).json({ error: 'You can only decline your own assignments' });
+    }
+
+    const { data: updated, error: uErr } = await supabaseAdmin
+      .from('student_assignments')
+      .update({ status: 'DECLINED' })
+      .eq('id', assignmentId)
+      .select()
+      .single();
+
+    if (uErr) return res.status(500).json({ error: uErr.message });
+
+    // Notify admins + managers
+    const { data: staff } = await supabaseAdmin
+      .from('users')
+      .select('id')
+      .in('role', ['ADMIN', 'MENTOR_MANAGER']);
+
+    const { data: mentorUser } = await supabaseAdmin
+      .from('users')
+      .select('name')
+      .eq('id', assignment.mentor_id)
+      .maybeSingle();
+
+    const { data: studentUser } = await supabaseAdmin
+      .from('users')
+      .select('name')
+      .eq('id', assignment.student_id)
+      .maybeSingle();
+
+    if (staff && staff.length > 0) {
+      await supabaseAdmin.from('notifications').insert(
+        staff.map((u: { id: string }) => ({
+          user_id: u.id,
+          title: 'Assignment Declined',
+          message: `Mentor ${mentorUser?.name || 'Unknown'} declined assignment for ${studentUser?.name || 'a student'}. Please reassign.`,
+          type: 'URGENT',
+          category: 'ASSIGNMENT',
+          related_id: assignmentId,
+          is_read: false,
+          created_by: requesterId,
+        })),
+      );
+    }
+
+    res.json({ message: 'Assignment declined', assignment: updated });
+  } catch (error: any) {
+    console.error('Error declining assignment:', error);
+    res.status(500).json({ error: error.message || 'Server error declining assignment' });
   }
 });
 
