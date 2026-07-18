@@ -131,6 +131,7 @@ router.put('/:id', authorize('ADMIN'), async (req: AuthRequest, res: Response) =
     if (updates.trigger !== undefined) dbUpdates.trigger = updates.trigger;
     if (updates.steps !== undefined) dbUpdates.steps = updates.steps;
     if (updates.isActive !== undefined) dbUpdates.is_active = updates.isActive;
+    if (updates.is_active !== undefined) dbUpdates.is_active = updates.is_active;
 
     const { data: updated, error } = await supabaseAdmin
       .from('workflows')

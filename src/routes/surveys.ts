@@ -11,7 +11,7 @@ router.use(authenticate);
 // List surveys (role filters: non-staff see active targeted surveys, staff see all)
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const role = req.user!.role;
+    const role = String(req.user!.role || '').toUpperCase();
 
     let query = supabaseAdmin
       .from('surveys')
@@ -30,7 +30,56 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       return res.status(500).json({ error: error.message });
     }
 
-    res.json({ surveys: surveys || [] });
+    const list = surveys || [];
+
+    // Exact per-survey counts + latest submitted_at (avoids nested FK / row-limit issues)
+    const statsEntries = await Promise.all(
+      list.map(async (s: { id: string }) => {
+        const [{ count, error: countErr }, { data: latest, error: latestErr }] =
+          await Promise.all([
+            supabaseAdmin
+              .from('survey_responses')
+              .select('*', { count: 'exact', head: true })
+              .eq('survey_id', s.id),
+            supabaseAdmin
+              .from('survey_responses')
+              .select('submitted_at')
+              .eq('survey_id', s.id)
+              .order('submitted_at', { ascending: false })
+              .limit(1)
+              .maybeSingle(),
+          ]);
+
+        if (countErr) console.error('Survey count error:', s.id, countErr.message);
+        if (latestErr) console.error('Survey latest response error:', s.id, latestErr.message);
+
+        return [
+          s.id,
+          {
+            count: count ?? 0,
+            lastResponseAt: (latest as { submitted_at?: string } | null)?.submitted_at ?? null,
+          },
+        ] as const;
+      })
+    );
+
+    const stats = Object.fromEntries(statsEntries) as Record<
+      string,
+      { count: number; lastResponseAt: string | null }
+    >;
+
+    res.json({
+      surveys: list.map((s: { id: string }) => {
+        const meta = stats[s.id] || { count: 0, lastResponseAt: null };
+        return {
+          ...s,
+          response_count: meta.count,
+          responseCount: meta.count,
+          last_response_at: meta.lastResponseAt,
+          lastResponseAt: meta.lastResponseAt,
+        };
+      }),
+    });
   } catch (error: any) {
     console.error('List surveys error:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
@@ -281,11 +330,23 @@ router.get('/:id/analytics', authorize('ADMIN', 'MENTOR_MANAGER'), async (req: A
     for (const question of questionsList) {
       const qId = question.id;
       const qType = question.type;
-      const questionText = question.questionText;
+      const questionText = question.questionText || question.question || 'Question';
 
       const qAnswers = responses
         ? responses
-            .map(r => (r.answers as any[] || []).find((a: any) => a.questionId === qId))
+            .map(r => {
+              const answers = r.answers;
+              if (Array.isArray(answers)) {
+                return answers.find((a: any) => a.questionId === qId);
+              }
+              if (answers && typeof answers === 'object') {
+                const val = (answers as Record<string, unknown>)[qId];
+                return val !== undefined && val !== null && val !== ''
+                  ? { questionId: qId, answerText: String(val) }
+                  : undefined;
+              }
+              return undefined;
+            })
             .filter(a => a !== undefined && a.answerText !== '')
         : [];
 

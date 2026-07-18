@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import crypto from 'crypto';
 import { supabaseAdmin } from '../config/supabase.js';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth.js';
 import { messaging } from '../config/firebase.js';
@@ -193,6 +194,190 @@ router.delete('/unregister-token', async (req: AuthRequest, res: Response) => {
     res.json({ success: true });
   } catch (error) {
     console.error('Unregister token error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ─── POST /api/notifications/broadcast ────────────────────────────────
+// Admin/Manager: send a system alert to all users matching targetRole
+router.post('/broadcast', authorize('ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { title, message, type = 'INFO', targetRole = 'BOTH' } = req.body as {
+      title?: string;
+      message?: string;
+      type?: 'INFO' | 'WARNING' | 'URGENT';
+      targetRole?: 'STUDENT' | 'MENTOR' | 'BOTH';
+    };
+
+    if (!title?.trim() || !message?.trim()) {
+      return res.status(400).json({ error: 'Title and message are required' });
+    }
+
+    const allowedTypes = ['INFO', 'WARNING', 'URGENT'];
+    const notifType = allowedTypes.includes(type) ? type : 'INFO';
+    const roleTarget = ['STUDENT', 'MENTOR', 'BOTH'].includes(targetRole) ? targetRole : 'BOTH';
+
+    let usersQuery = supabaseAdmin.from('users').select('id, role');
+    if (roleTarget === 'STUDENT') {
+      usersQuery = usersQuery.eq('role', 'STUDENT');
+    } else if (roleTarget === 'MENTOR') {
+      usersQuery = usersQuery.in('role', ['MENTOR', 'MENTOR_MANAGER']);
+    } else {
+      usersQuery = usersQuery.in('role', ['STUDENT', 'MENTOR', 'MENTOR_MANAGER', 'ADMIN']);
+    }
+
+    const { data: users, error: usersError } = await usersQuery;
+    if (usersError) {
+      return res.status(500).json({ error: usersError.message });
+    }
+    if (!users || users.length === 0) {
+      return res.json({ success: true, notified: 0, broadcast: null });
+    }
+
+    const batchId = crypto.randomUUID();
+    const relatedId = `broadcast:${roleTarget}:${batchId}`;
+
+    const rows = users.map((u: { id: string }) => ({
+      user_id: u.id,
+      title: title.trim(),
+      message: message.trim(),
+      type: notifType,
+      category: 'BROADCAST',
+      related_id: relatedId,
+      is_read: false,
+      created_by: req.user!.id,
+    }));
+
+    const { error: insertError } = await supabaseAdmin.from('notifications').insert(rows);
+    if (insertError) {
+      return res.status(500).json({ error: insertError.message });
+    }
+
+    // Optional FCM push to recipients
+    let pushSent = 0;
+    if (messaging) {
+      const userIds = users.map((u: { id: string }) => u.id);
+      const { data: tokens } = await supabaseAdmin
+        .from('fcm_tokens')
+        .select('token')
+        .in('user_id', userIds);
+
+      if (tokens && tokens.length > 0) {
+        const tokenStrings = tokens.map((t: { token: string }) => t.token);
+        try {
+          const response = await messaging.sendEachForMulticast({
+            tokens: tokenStrings,
+            notification: { title: title.trim(), body: message.trim().slice(0, 180) },
+            webpush: {
+              fcmOptions: { link: process.env.FRONTEND_URL || 'http://localhost:3000' },
+            },
+            data: { type: 'BROADCAST', relatedId },
+          });
+          pushSent = response.successCount;
+        } catch (fcmError) {
+          console.error('Broadcast FCM error:', fcmError);
+        }
+      }
+    }
+
+    res.status(201).json({
+      success: true,
+      notified: users.length,
+      pushSent,
+      broadcast: {
+        id: relatedId,
+        title: title.trim(),
+        message: message.trim(),
+        type: notifType,
+        targetRole: roleTarget,
+        target_role: roleTarget,
+        category: 'BROADCAST',
+        related_id: relatedId,
+        created_by: req.user!.id,
+        createdBy: req.user!.id,
+        created_at: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+        notified: users.length,
+      },
+    });
+  } catch (error) {
+    console.error('Broadcast notification error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ─── GET /api/notifications/broadcasts ────────────────────────────────
+// Admin/Manager: list recent broadcast alerts (grouped by related_id)
+router.get('/broadcasts', authorize('ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('notifications')
+      .select('id, title, message, type, category, related_id, created_at, created_by')
+      .eq('category', 'BROADCAST')
+      .order('created_at', { ascending: false })
+      .limit(500);
+
+    if (error) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    const seen = new Set<string>();
+    const broadcasts = [];
+    for (const row of data || []) {
+      const key = row.related_id || row.id;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const parts = String(row.related_id || '').split(':');
+      const targetRole = (parts[0] === 'broadcast' && parts[1] ? parts[1] : 'BOTH') as
+        | 'STUDENT'
+        | 'MENTOR'
+        | 'BOTH';
+      broadcasts.push({
+        id: key,
+        title: row.title,
+        message: row.message,
+        type: row.type,
+        category: row.category,
+        related_id: row.related_id,
+        targetRole,
+        target_role: targetRole,
+        created_at: row.created_at,
+        createdAt: row.created_at,
+        created_by: row.created_by,
+        createdBy: row.created_by,
+      });
+      if (broadcasts.length >= 50) break;
+    }
+
+    res.json({ broadcasts });
+  } catch (error) {
+    console.error('List broadcasts error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ─── DELETE /api/notifications/broadcasts/:relatedId ──────────────────
+// Admin/Manager: remove all notification rows for a broadcast batch
+router.delete('/broadcasts/:relatedId', authorize('ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res: Response) => {
+  try {
+    const relatedId = decodeURIComponent(req.params.relatedId);
+    if (!relatedId.startsWith('broadcast:')) {
+      return res.status(400).json({ error: 'Invalid broadcast id' });
+    }
+
+    const { error } = await supabaseAdmin
+      .from('notifications')
+      .delete()
+      .eq('related_id', relatedId)
+      .eq('category', 'BROADCAST');
+
+    if (error) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete broadcast error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
