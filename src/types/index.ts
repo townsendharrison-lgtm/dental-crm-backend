@@ -437,8 +437,13 @@ export interface AdminSettings {
   maintenance_mode: boolean;
   auto_reply_enabled: boolean;
   auto_reply_message?: string | null;
+  auto_reply_inactivity_minutes?: number;
+  auto_reply_rate_limit_minutes?: number;
   welcome_template_student?: string | null;
   welcome_template_mentor?: string | null;
+  accepted_message?: string | null;
+  interview_message?: string | null;
+  waitlist_message?: string | null;
   created_at: string;
   updated_at: string;
 }

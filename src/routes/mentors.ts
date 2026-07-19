@@ -149,7 +149,25 @@ router.get('/assignments/pending', authenticate, authorize('MENTOR'), async (req
       .order('assigned_at', { ascending: false });
 
     if (error) return res.status(500).json({ error: error.message });
-    res.json({ assignments: data || [] });
+
+    const assignments = data || [];
+    const studentIds = Array.from(new Set(assignments.map((a) => a.student_id).filter(Boolean)));
+
+    let studentsById = new Map<string, { id: string; name: string; email: string; avatar?: string | null; role: string }>();
+    if (studentIds.length > 0) {
+      const { data: users } = await supabaseAdmin
+        .from('users')
+        .select('id, name, email, avatar, role')
+        .in('id', studentIds);
+      (users || []).forEach((u) => studentsById.set(u.id, u));
+    }
+
+    res.json({
+      assignments: assignments.map((a) => ({
+        ...a,
+        student: studentsById.get(a.student_id) || null,
+      })),
+    });
   } catch (error: any) {
     console.error('Error fetching pending assignments:', error);
     res.status(500).json({ error: error.message || 'Server error' });

@@ -402,50 +402,69 @@ router.post('/:id/messages', async (req: AuthRequest, res: Response) => {
       try {
         const { data: config } = await supabaseAdmin
           .from('admin_settings')
-          .select('auto_reply_enabled, auto_reply_message')
+          .select(
+            'auto_reply_enabled, auto_reply_message, auto_reply_inactivity_minutes, auto_reply_rate_limit_minutes'
+          )
           .eq('id', 1)
           .maybeSingle();
 
         if (config?.auto_reply_enabled && config?.auto_reply_message) {
           const mentorId = recipients[0];
           const autoReplyText = config.auto_reply_message;
+          const inactivityMinutes = Number(config.auto_reply_inactivity_minutes ?? 120);
+          const rateLimitMinutes = Number(config.auto_reply_rate_limit_minutes ?? 1440);
 
-          // Check role of the recipient to verify it is staff/mentor
           const { data: otherUser } = await supabaseAdmin
             .from('users')
             .select('role, name')
             .eq('id', mentorId)
             .maybeSingle();
 
-          if (otherUser && (otherUser.role === 'MENTOR' || otherUser.role === 'ADMIN' || otherUser.role === 'MENTOR_MANAGER')) {
-            // Check if the last message from this advisor (mentorId) in this conversation was within the last 24 hours
-            const { data: lastMessages } = await supabaseAdmin
+          if (
+            otherUser &&
+            (otherUser.role === 'MENTOR' ||
+              otherUser.role === 'ADMIN' ||
+              otherUser.role === 'MENTOR_MANAGER')
+          ) {
+            const { data: lastMentorMessages } = await supabaseAdmin
               .from('messages')
-              .select('created_at')
+              .select('created_at, text')
               .eq('conversation_id', id)
               .eq('sender_id', mentorId)
               .order('created_at', { ascending: false })
-              .limit(1);
+              .limit(20);
 
             let shouldSendAutoReply = true;
-            if (lastMessages && lastMessages.length > 0) {
-              const lastMessageTime = new Date(lastMessages[0].created_at).getTime();
-              const twentyFourHoursAgo = Date.now() - 24 * 60 * 60 * 1000;
-              if (lastMessageTime > twentyFourHoursAgo) {
+            const now = Date.now();
+            const inactivityMs = inactivityMinutes * 60 * 1000;
+            const rateLimitMs = rateLimitMinutes * 60 * 1000;
+
+            if (lastMentorMessages && lastMentorMessages.length > 0) {
+              const lastMessageTime = new Date(lastMentorMessages[0].created_at).getTime();
+              // Mentor still "active" within inactivity window → skip
+              if (now - lastMessageTime < inactivityMs) {
+                shouldSendAutoReply = false;
+              }
+
+              // Rate-limit: another auto-reply (matching template) was sent too recently
+              const recentAutoReply = lastMentorMessages.find(
+                (m) =>
+                  m.text === autoReplyText &&
+                  now - new Date(m.created_at).getTime() < rateLimitMs
+              );
+              if (recentAutoReply) {
                 shouldSendAutoReply = false;
               }
             }
 
             if (shouldSendAutoReply) {
-              // Post auto-reply message
               await supabaseAdmin.from('messages').insert({
                 conversation_id: id,
                 sender_id: mentorId,
                 text: autoReplyText,
-                read_by: [mentorId]
+                read_by: [mentorId],
               });
 
-              // Create notification for student
               await supabaseAdmin.from('notifications').insert({
                 user_id: userId,
                 title: `💬 Auto-Reply from ${otherUser.name || 'Advisor'}`,
@@ -454,7 +473,7 @@ router.post('/:id/messages', async (req: AuthRequest, res: Response) => {
                 category: 'NEW_MESSAGE',
                 related_id: id,
                 is_read: false,
-                created_by: mentorId
+                created_by: mentorId,
               });
             }
           }
