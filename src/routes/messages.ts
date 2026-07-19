@@ -147,6 +147,11 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 router.post('/', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
+
+    if (req.user!.role === 'STUDENT') {
+      return res.status(403).json({ error: 'Students cannot start new conversations' });
+    }
+
     const { participantIds, isGroup = false, name } = req.body;
 
     if (!participantIds || !Array.isArray(participantIds) || participantIds.length === 0) {
@@ -606,6 +611,10 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
     const { id } = req.params;
 
+    if (req.user!.role === 'STUDENT') {
+      return res.status(403).json({ error: 'Students cannot delete conversations' });
+    }
+
     const { data: conv, error: convErr } = await supabaseAdmin
       .from('conversations')
       .select('*')
@@ -647,6 +656,10 @@ router.put('/:id/rename', async (req: AuthRequest, res: Response) => {
     const { id } = req.params;
     const { name } = req.body;
 
+    if (req.user!.role === 'STUDENT') {
+      return res.status(403).json({ error: 'Students cannot rename group chats' });
+    }
+
     if (!name || name.trim() === '') {
       return res.status(400).json({ error: 'New name is required' });
     }
@@ -681,6 +694,102 @@ router.put('/:id/rename', async (req: AuthRequest, res: Response) => {
     }
 
     res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// ─── POST /api/conversations/:id/members ─────────────────────────────
+// Add members to a group conversation
+router.post('/:id/members', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { id } = req.params;
+    const { userIds } = req.body as { userIds?: string[] };
+
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      return res.status(400).json({ error: 'userIds array is required' });
+    }
+
+    const { data: conv, error } = await supabaseAdmin
+      .from('conversations')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error || !conv) return res.status(404).json({ error: 'Conversation not found' });
+    if (!conv.participant_ids?.includes(userId)) {
+      return res.status(403).json({ error: 'You are not a participant in this conversation' });
+    }
+    if (!conv.is_group) {
+      return res.status(400).json({ error: 'Only group chats can add members' });
+    }
+
+    const nextIds = Array.from(new Set([...(conv.participant_ids || []), ...userIds]));
+    const { data: updated, error: updateErr } = await supabaseAdmin
+      .from('conversations')
+      .update({ participant_ids: nextIds, updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateErr) return res.status(400).json({ error: updateErr.message });
+
+    const { data: users } = await supabaseAdmin
+      .from('users')
+      .select('id, name, email, role, avatar')
+      .in('id', nextIds);
+
+    res.json({ ...updated, participants: users || [] });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// ─── DELETE /api/conversations/:id/members/:memberId ─────────────────
+// Remove a member from a group conversation
+router.delete('/:id/members/:memberId', async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { id, memberId } = req.params;
+
+    const { data: conv, error } = await supabaseAdmin
+      .from('conversations')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error || !conv) return res.status(404).json({ error: 'Conversation not found' });
+    if (!conv.participant_ids?.includes(userId)) {
+      return res.status(403).json({ error: 'You are not a participant in this conversation' });
+    }
+    if (!conv.is_group) {
+      return res.status(400).json({ error: 'Only group chats can remove members' });
+    }
+    if (memberId === userId) {
+      return res.status(400).json({ error: 'Use leave/delete to remove yourself from the chat' });
+    }
+
+    const nextIds = (conv.participant_ids || []).filter((pid: string) => pid !== memberId);
+    if (nextIds.length < 2) {
+      return res.status(400).json({ error: 'Group must keep at least two participants' });
+    }
+
+    const { data: updated, error: updateErr } = await supabaseAdmin
+      .from('conversations')
+      .update({ participant_ids: nextIds, updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateErr) return res.status(400).json({ error: updateErr.message });
+
+    const { data: users } = await supabaseAdmin
+      .from('users')
+      .select('id, name, email, role, avatar')
+      .in('id', nextIds);
+
+    res.json({ ...updated, participants: users || [] });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
