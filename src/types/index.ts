@@ -129,6 +129,13 @@ export interface Message {
   created_at: string;
 }
 
+export type MeetingAudience =
+  | 'ADMIN_DIRECT'
+  | 'STUDENT'
+  | 'MENTORS'
+  | 'STAFF'
+  | 'GLOBAL';
+
 export interface Meeting {
   id: string;
   student_id?: string | null;
@@ -141,6 +148,7 @@ export interface Meeting {
   notes?: string | null;
   mentor_notes?: string | null;
   type: 'STUDENT_MEETING' | 'MANAGER_MEETING' | 'GENERAL';
+  audience?: MeetingAudience | null;
   link?: string | null;
   completed: boolean;
   attendees: string[];
