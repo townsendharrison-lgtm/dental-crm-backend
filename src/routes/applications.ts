@@ -133,7 +133,8 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       status = 'Applied',
       appliedDate,
       interviewDate,
-      decisionDate
+      decisionDate,
+      notes,
     } = req.body;
 
     if (!schoolId) {
@@ -178,9 +179,10 @@ router.post('/', async (req: AuthRequest, res: Response) => {
         status,
         applied_date: appliedDate || null,
         interview_date: interviewDate || null,
-        decision_date: decisionDate || null
+        decision_date: decisionDate || null,
+        notes: notes || null,
       })
-      .select()
+      .select('*, school:schools(*)')
       .single();
 
     if (error) {
@@ -250,12 +252,13 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     if (updates.appliedDate !== undefined) dbUpdates.applied_date = updates.appliedDate;
     if (updates.interviewDate !== undefined) dbUpdates.interview_date = updates.interviewDate;
     if (updates.decisionDate !== undefined) dbUpdates.decision_date = updates.decisionDate;
+    if (updates.notes !== undefined) dbUpdates.notes = updates.notes;
 
     const { data: updated, error } = await supabaseAdmin
       .from('applications')
       .update(dbUpdates)
       .eq('id', id)
-      .select()
+      .select('*, school:schools(*)')
       .single();
 
     if (error) {

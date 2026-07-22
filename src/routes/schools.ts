@@ -59,6 +59,99 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ─── POST /api/schools/ensure ────────────────────────────────────────
+// Find a school by name (case-insensitive) or create it. Any authenticated user.
+// Used when adding catalog/sheet schools to a student list or logging applications.
+router.post('/ensure', async (req: AuthRequest, res: Response) => {
+  try {
+    const {
+      name,
+      location = 'Unknown',
+      strengthScoreAvg = 0,
+      datAvg = 0,
+      avgGpa = 0,
+      acceptanceRate,
+      isAcceptanceRate,
+      oosAcceptanceRate,
+      ccCredits = true,
+      tuition,
+      notes,
+      inStateEnrollment,
+      outOfStateEnrollment,
+      maleEnrollment,
+      femaleEnrollment,
+      ethnicity = {},
+      minDat5th,
+      minCgpa5th,
+    } = req.body || {};
+
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'School name is required' });
+    }
+
+    const trimmedName = name.trim();
+
+    const { data: existing, error: findErr } = await supabaseAdmin
+      .from('schools')
+      .select('*')
+      .ilike('name', trimmedName)
+      .limit(1)
+      .maybeSingle();
+
+    if (findErr) {
+      return res.status(500).json({ error: findErr.message });
+    }
+
+    if (existing) {
+      return res.json(existing);
+    }
+
+    const { data: created, error: createErr } = await supabaseAdmin
+      .from('schools')
+      .insert({
+        name: trimmedName,
+        location: (location && String(location).trim()) || 'Unknown',
+        strength_score_avg: strengthScoreAvg || 0,
+        dat_avg: datAvg || 0,
+        avg_gpa: avgGpa || 0,
+        acceptance_rate: acceptanceRate ?? null,
+        is_acceptance_rate: isAcceptanceRate ?? null,
+        oos_acceptance_rate: oosAcceptanceRate ?? null,
+        cc_credits: ccCredits !== false,
+        tuition: tuition || null,
+        notes: notes || null,
+        in_state_enrollment: inStateEnrollment ?? null,
+        out_of_state_enrollment: outOfStateEnrollment ?? null,
+        male_enrollment: maleEnrollment ?? null,
+        female_enrollment: femaleEnrollment ?? null,
+        ethnicity: ethnicity || {},
+        min_dat_5th: minDat5th ?? null,
+        min_cgpa_5th: minCgpa5th ?? null,
+      })
+      .select()
+      .single();
+
+    if (createErr) {
+      // Race: another request created the same name
+      if (createErr.code === '23505') {
+        const { data: raced } = await supabaseAdmin
+          .from('schools')
+          .select('*')
+          .ilike('name', trimmedName)
+          .limit(1)
+          .maybeSingle();
+        if (raced) return res.json(raced);
+      }
+      return res.status(400).json({ error: createErr.message });
+    }
+
+    res.status(201).json(created);
+  } catch (error: any) {
+    console.error('Ensure school error:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
 // ─── POST /api/schools ───────────────────────────────────────────────
 // Create a new school profile (Admin only)
 router.post('/', authorize('ADMIN'), async (req: AuthRequest, res: Response) => {

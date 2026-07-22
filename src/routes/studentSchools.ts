@@ -140,7 +140,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
         decision_date: decisionDate || null,
         notes: notes || null
       })
-      .select()
+      .select('*, school:schools(*)')
       .single();
 
     if (error) {
@@ -216,7 +216,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
       .from('student_schools')
       .update(dbUpdates)
       .eq('id', id)
-      .select()
+      .select('*, school:schools(*)')
       .single();
 
     if (error) {
