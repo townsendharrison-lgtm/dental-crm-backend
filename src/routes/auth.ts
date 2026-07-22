@@ -127,11 +127,11 @@ router.post('/complete-invitation', async (req: Request, res: Response) => {
               read_by: [adminUser.id]
             });
 
-            // Create notification for the new user
+            // Create notification for the new user (store full welcome text)
             await supabaseAdmin.from('notifications').insert({
               user_id: authUser.id,
               title: `👋 Welcome to Dental CRM`,
-              message: welcomeText.substring(0, 80),
+              message: welcomeText,
               type: 'INFO',
               category: 'NEW_MESSAGE',
               related_id: newConv.id,
