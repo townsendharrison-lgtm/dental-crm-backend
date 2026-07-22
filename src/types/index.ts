@@ -83,6 +83,8 @@ export interface StudentProfile {
   created_at: string;
   updated_at: string;
 }
+
+export interface MentorProfile {
   id: string;
   avg_response_time: string;
   avg_response_time_value: number;

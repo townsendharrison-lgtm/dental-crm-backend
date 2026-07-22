@@ -555,7 +555,13 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 
     if (error) return res.status(500).json({ error: error.message });
 
-    if (role !== 'STUDENT' && meetingScheduleFieldsChanged(existing, updated)) {
+    // Completing a meeting often also normalizes title/date/duration — that is not a reschedule.
+    const becomingCompleted = !existing.completed && !!updated.completed;
+    if (
+      role !== 'STUDENT' &&
+      !becomingCompleted &&
+      meetingScheduleFieldsChanged(existing, updated)
+    ) {
       void notifyMeetingParties({
         meeting: updated,
         actorId: userId,
