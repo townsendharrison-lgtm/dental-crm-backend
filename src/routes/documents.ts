@@ -323,12 +323,15 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 
     // Trigger notification to student if status was updated by mentor/admin
     if (updates.status && updates.status !== existing.status && !isOwner) {
-      const statusSymbol = updates.status === 'Reviewed' ? '✅' : '⚠️';
+      const statusSymbol =
+        updates.status === 'Reviewed' ? '✅' : updates.status === 'Cancelled' ? '🚫' : '⚠️';
+      const notifType =
+        updates.status === 'Needs Revision' || updates.status === 'Cancelled' ? 'WARNING' : 'INFO';
       await supabaseAdmin.from('notifications').insert({
         user_id: existing.student_id,
-        title: `${statusSymbol} Document Reviewed`,
+        title: `${statusSymbol} Document ${updates.status === 'Cancelled' ? 'Cancelled' : 'Reviewed'}`,
         message: `Your ${existing.type} "${existing.title}" status has been updated to "${updates.status}".`,
-        type: updates.status === 'Needs Revision' ? 'WARNING' : 'INFO',
+        type: notifType,
         category: 'DOCUMENT_REVIEWED',
         related_id: id,
         created_by: userId

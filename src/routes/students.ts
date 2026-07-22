@@ -156,8 +156,12 @@ router.get('/:id', authenticate, async (req: AuthRequest, res: Response) => {
 
     // Refresh auto strength score on read so it stays current
     const { recalculateStudentStrengthScore } = await import('../services/recalculateStrengthScore.js');
-    const strengthScore = await recalculateStudentStrengthScore(id);
-    profile = { ...profile, strength_score: strengthScore };
+    const { recalculateStudentResponseTime } = await import('../services/studentResponseTime.js');
+    const [strengthScore, avgResponseTime] = await Promise.all([
+      recalculateStudentStrengthScore(id),
+      recalculateStudentResponseTime(id),
+    ]);
+    profile = { ...profile, strength_score: strengthScore, avg_response_time: avgResponseTime };
 
     const { listStudentSchoolCategories } = await import('../services/schoolCategories.js');
     const schoolCategories = await listStudentSchoolCategories(id);

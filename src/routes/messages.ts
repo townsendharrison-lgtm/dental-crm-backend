@@ -481,6 +481,13 @@ router.post('/:id/messages', async (req: AuthRequest, res: Response) => {
       } catch (arErr) {
         console.error('Auto-reply trigger error:', arErr);
       }
+
+      // Refresh student avg response time from mentor/admin DMs (fire-and-forget)
+      void import('../services/studentResponseTime.js')
+        .then(({ recalculateStudentResponseTime }) =>
+          recalculateStudentResponseTime(userId),
+        )
+        .catch((err) => console.error('Response time recalc error:', err));
     }
 
     res.status(201).json(message);
