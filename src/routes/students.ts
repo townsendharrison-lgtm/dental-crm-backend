@@ -159,9 +159,16 @@ router.get('/:id', authenticate, async (req: AuthRequest, res: Response) => {
     const strengthScore = await recalculateStudentStrengthScore(id);
     profile = { ...profile, strength_score: strengthScore };
 
+    const { listStudentSchoolCategories } = await import('../services/schoolCategories.js');
+    const schoolCategories = await listStudentSchoolCategories(id);
+
     res.json({
       ...user,
-      profile
+      profile: {
+        ...profile,
+        school_categories: schoolCategories,
+      },
+      schoolCategories,
     });
   } catch (error: any) {
     console.error('Error fetching student profile:', error);
@@ -238,7 +245,8 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
       'zip_code', 'gpa', 'dat_score', 'dat_aa', 'dat_ts', 'is_reapplicant',
       'application_cycle', 'state', 'country', 'ethnicity', 'gender', 'age',
       'undergrad_institution', 'undergrad_degree', 'undergrad_grad_year',
-      'post_bac', 'masters', 'lor_required', 'lor_external_service', 'timezone'
+      'post_bac', 'masters', 'lor_required', 'lor_external_service', 'timezone',
+      'school_categories',
     ];
 
     commonFields.forEach(field => {
@@ -246,6 +254,11 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
         dbUpdates[field] = updates[field];
       }
     });
+
+    // Accept camelCase schoolCategories from the frontend
+    if (updates.schoolCategories !== undefined && updates.school_categories === undefined) {
+      dbUpdates.school_categories = updates.schoolCategories;
+    }
 
     // If GPA/DAT values change without an explicit re-verify, clear verification
     // so unverified edits cannot keep affecting strength score.
@@ -548,6 +561,67 @@ router.delete('/:id', authenticate, authorize('ADMIN'), async (req: AuthRequest,
   } catch (error: any) {
     console.error('Error deleting student:', error);
     res.status(500).json({ error: error.message || 'Server error deleting student' });
+  }
+});
+
+// ─── School list categories ──────────────────────────────────────────
+
+async function assertCanAccessStudentCategories(req: AuthRequest, studentId: string) {
+  const requesterId = req.user!.id;
+  const role = req.user!.role;
+  if (role === 'STUDENT') {
+    if (requesterId !== studentId) return { ok: false as const, status: 403, error: 'Access denied' };
+    return { ok: true as const };
+  }
+  if (role === 'ADMIN' || role === 'MENTOR_MANAGER') return { ok: true as const };
+  if (role === 'MENTOR') {
+    const { data: profile } = await supabaseAdmin
+      .from('student_profiles')
+      .select('mentor_id')
+      .eq('id', studentId)
+      .maybeSingle();
+    if (profile?.mentor_id !== requesterId) {
+      return { ok: false as const, status: 403, error: 'You are not assigned to this student' };
+    }
+    return { ok: true as const };
+  }
+  return { ok: false as const, status: 403, error: 'Access denied' };
+}
+
+// GET /api/students/:id/school-categories
+router.get('/:id/school-categories', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const access = await assertCanAccessStudentCategories(req, id);
+    if (!access.ok) return res.status(access.status).json({ error: access.error });
+
+    const { listStudentSchoolCategories } = await import('../services/schoolCategories.js');
+    const categories = await listStudentSchoolCategories(id);
+    res.json({ categories });
+  } catch (error: any) {
+    console.error('List school categories error:', error);
+    res.status(500).json({ error: error.message || 'Failed to load school categories' });
+  }
+});
+
+// PUT /api/students/:id/school-categories
+router.put('/:id/school-categories', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const access = await assertCanAccessStudentCategories(req, id);
+    if (!access.ok) return res.status(access.status).json({ error: access.error });
+
+    const categories = req.body?.categories ?? req.body?.schoolCategories ?? req.body;
+    if (!Array.isArray(categories)) {
+      return res.status(400).json({ error: 'categories array is required' });
+    }
+
+    const { replaceStudentSchoolCategories } = await import('../services/schoolCategories.js');
+    const saved = await replaceStudentSchoolCategories(id, categories);
+    res.json({ categories: saved });
+  } catch (error: any) {
+    console.error('Save school categories error:', error);
+    res.status(500).json({ error: error.message || 'Failed to save school categories' });
   }
 });
 

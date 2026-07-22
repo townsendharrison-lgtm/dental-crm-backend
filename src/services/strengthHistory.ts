@@ -43,21 +43,38 @@ export async function listStrengthHistory(studentId: string) {
     .order('recorded_at', { ascending: true });
 
   if (!error && data && data.length > 0) {
-    // Ensure the latest profile score is represented
-    const last = data[data.length - 1];
-    const current = Math.round(Number(profile?.strength_score) || 0);
-    if (profile && last.strength_score !== current) {
-      return [
-        ...data,
-        {
-          id: `current-${studentId}`,
-          student_id: studentId,
-          strength_score: current,
-          recorded_at: profile.updated_at || new Date().toISOString(),
-        },
-      ];
+    // Collapse consecutive duplicate scores from concurrent recalcs
+    const unique: typeof data = [];
+    let lastScore: number | null = null;
+    for (const row of data) {
+      const score = Math.round(Number(row.strength_score) || 0);
+      if (lastScore === score) continue;
+      unique.push(row);
+      lastScore = score;
     }
-    return data;
+
+    const last = unique[unique.length - 1];
+    const current = Math.round(Number(profile?.strength_score) || 0);
+    const lastScoreValue = Math.round(Number(last?.strength_score) || 0);
+
+    // Only append the profile score when it is newer than the last history row.
+    // Avoid regressing the chart when profile.strength_score is stale vs history.
+    if (profile && last && lastScoreValue !== current) {
+      const profileAt = new Date(profile.updated_at || 0).getTime();
+      const lastAt = new Date(last.recorded_at).getTime();
+      if (!Number.isNaN(profileAt) && !Number.isNaN(lastAt) && profileAt > lastAt) {
+        return [
+          ...unique,
+          {
+            id: `current-${studentId}`,
+            student_id: studentId,
+            strength_score: current,
+            recorded_at: profile.updated_at || new Date().toISOString(),
+          },
+        ];
+      }
+    }
+    return unique;
   }
 
   if (error) {

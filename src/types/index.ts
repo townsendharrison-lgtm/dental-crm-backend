@@ -79,11 +79,10 @@ export interface StudentProfile {
   lor_external_service: boolean;
   timezone?: string | null;
   last_profile_reminder_at?: string | null;
+  school_categories?: Array<{ id: string; name: string; color: string; icon: string }> | null;
   created_at: string;
   updated_at: string;
 }
-
-export interface MentorProfile {
   id: string;
   avg_response_time: string;
   avg_response_time_value: number;
