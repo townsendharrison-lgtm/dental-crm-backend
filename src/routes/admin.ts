@@ -377,4 +377,67 @@ router.delete('/users/:id', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// Bulk delete student accounts older than N years
+router.post('/users/bulk-delete-old-students', async (req: AuthRequest, res: Response) => {
+  try {
+    const years = Number(req.body?.olderThanYears);
+    if (!Number.isFinite(years) || years < 1 || years > 50) {
+      return res.status(400).json({ error: 'olderThanYears must be between 1 and 50' });
+    }
+
+    const cutoff = new Date();
+    cutoff.setFullYear(cutoff.getFullYear() - years);
+    const cutoffIso = cutoff.toISOString();
+
+    const { data: candidates, error: listError } = await supabaseAdmin
+      .from('users')
+      .select('id, email, name, created_at')
+      .eq('role', 'STUDENT')
+      .lt('created_at', cutoffIso);
+
+    if (listError) {
+      return res.status(400).json({ error: listError.message });
+    }
+
+    const students = (candidates || []).filter((u) => u.id !== req.user!.id);
+    let deleted = 0;
+    const failed: { id: string; error: string }[] = [];
+
+    for (const student of students) {
+      try {
+        const { error: userError } = await supabaseAdmin
+          .from('users')
+          .delete()
+          .eq('id', student.id);
+
+        if (userError) {
+          failed.push({ id: student.id, error: userError.message });
+          continue;
+        }
+
+        const { error: authError } = await supabaseAdmin.auth.admin.deleteUser(student.id);
+        if (authError) {
+          failed.push({ id: student.id, error: authError.message });
+          continue;
+        }
+
+        deleted += 1;
+      } catch (err: any) {
+        failed.push({ id: student.id, error: err?.message || 'Unknown error' });
+      }
+    }
+
+    res.json({
+      message: `Deleted ${deleted} student${deleted === 1 ? '' : 's'} older than ${years} year${years === 1 ? '' : 's'}`,
+      deleted,
+      failed,
+      cutoff: cutoffIso,
+      matched: students.length,
+    });
+  } catch (error) {
+    console.error('Bulk delete old students error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 export { router as adminRouter };
