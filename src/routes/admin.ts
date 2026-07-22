@@ -4,11 +4,65 @@ import { v4 as uuidv4 } from 'uuid';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth.js';
 import { VALID_ROLES } from '../types/index.js';
 import type { UserRole } from '../types/index.js';
+import { buildPlatformAnalytics } from '../services/platformAnalytics.js';
 
 const router = Router();
 
 // All admin routes require admin role
 router.use(authenticate, authorize('ADMIN'));
+
+// ─── GET /api/admin/analytics ────────────────────────────────────────
+// Platform-wide Global Data aggregations for the admin analytics page
+router.get('/analytics', async (_req: AuthRequest, res: Response) => {
+  try {
+    const [
+      { data: studentUsers, error: studentsError },
+      { data: profiles, error: profilesError },
+      { data: mentorUsers, error: mentorsError },
+      { data: mentorProfiles, error: mentorProfilesError },
+      { data: applications, error: appsError },
+      { data: experiences, error: expsError },
+    ] = await Promise.all([
+      supabaseAdmin.from('users').select('id, name, avatar, created_at').eq('role', 'STUDENT'),
+      supabaseAdmin.from('student_profiles').select('*'),
+      supabaseAdmin.from('users').select('id, name, avatar').eq('role', 'MENTOR'),
+      supabaseAdmin.from('mentor_profiles').select('*'),
+      supabaseAdmin.from('applications').select('*, school:schools(id, name)'),
+      supabaseAdmin.from('experiences').select('student_id, category, sessions:experience_sessions(duration)'),
+    ]);
+
+    if (studentsError) return res.status(500).json({ error: studentsError.message });
+    if (profilesError) return res.status(500).json({ error: profilesError.message });
+    if (mentorsError) return res.status(500).json({ error: mentorsError.message });
+    if (mentorProfilesError) return res.status(500).json({ error: mentorProfilesError.message });
+    if (appsError) return res.status(500).json({ error: appsError.message });
+    if (expsError) return res.status(500).json({ error: expsError.message });
+
+    const profilesMap: Record<string, any> = {};
+    (profiles || []).forEach((p: any) => {
+      profilesMap[p.id] = p;
+    });
+
+    const mentorProfilesMap: Record<string, any> = {};
+    (mentorProfiles || []).forEach((p: any) => {
+      mentorProfilesMap[p.id] = p;
+    });
+
+    const analytics = buildPlatformAnalytics({
+      studentUsers: studentUsers || [],
+      profiles: profilesMap,
+      mentorUsers: mentorUsers || [],
+      mentorProfiles: mentorProfilesMap,
+      applications: applications || [],
+      experiences: experiences || [],
+    });
+
+    res.json(analytics);
+  } catch (error: any) {
+    console.error('Platform analytics error:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
 
 // Invite user using Supabase built-in invite
 router.post('/invite', async (req: AuthRequest, res: Response) => {
