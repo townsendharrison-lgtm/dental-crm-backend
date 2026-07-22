@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { supabaseAdmin } from '../config/supabase.js';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth.js';
+import { registerNotesDexterityRoutes } from './studentNotesDexterity.js';
 
 const router = Router();
 
@@ -246,6 +247,22 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
       }
     });
 
+    // If GPA/DAT values change without an explicit re-verify, clear verification
+    // so unverified edits cannot keep affecting strength score.
+    const gpaChanging =
+      updates.gpa !== undefined && Number(updates.gpa) !== Number(existingProfile.gpa);
+    const datChanging =
+      (updates.dat_score !== undefined && Number(updates.dat_score) !== Number(existingProfile.dat_score)) ||
+      (updates.dat_aa !== undefined && Number(updates.dat_aa) !== Number(existingProfile.dat_aa)) ||
+      (updates.dat_ts !== undefined && Number(updates.dat_ts) !== Number(existingProfile.dat_ts));
+
+    if (gpaChanging && updates.gpa_verified !== true) {
+      dbUpdates.gpa_verified = false;
+    }
+    if (datChanging && updates.dat_verified !== true) {
+      dbUpdates.dat_verified = false;
+    }
+
     // Student specific restrictions:
     // Students cannot change mentor assignment, progress, readiness, or DAT verification status
     // strength_score is ALWAYS formula-driven — never accept client writes
@@ -404,6 +421,9 @@ router.get('/:id/strength-history', authenticate, async (req: AuthRequest, res: 
     res.status(500).json({ error: error.message || 'Server error fetching strength history' });
   }
 });
+
+// Notes + manual dexterity (Records tab)
+registerNotesDexterityRoutes(router);
 
 // DELETE /api/students/:id - Delete a student user (Admin only)
 router.delete('/:id', authenticate, authorize('ADMIN'), async (req: AuthRequest, res: Response) => {

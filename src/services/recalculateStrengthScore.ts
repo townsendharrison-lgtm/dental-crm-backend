@@ -38,6 +38,7 @@ export async function recalculateStudentStrengthScore(studentId: string): Promis
 
     const breakdown = calculateStrengthScore({
       gpa: profile.gpa,
+      gpaVerified: profile.gpa_verified,
       datAa: profile.dat_aa,
       datScore: profile.dat_score,
       datVerified: profile.dat_verified,

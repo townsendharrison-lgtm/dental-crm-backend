@@ -1,10 +1,13 @@
 /**
  * Strength score (0–100) — automatic competitiveness index.
  * Weighted from academics, DAT, clinical/experience hours, docs, and application readiness.
+ *
+ * GPA and DAT only contribute when staff have verified them (gpaVerified / datVerified).
  */
 
 export type StrengthScoreInputs = {
   gpa?: number | null;
+  gpaVerified?: boolean | null;
   datAa?: number | null;
   datScore?: number | null;
   datVerified?: boolean | null;
@@ -42,16 +45,15 @@ function hours(map: Partial<Record<string, number>> | undefined, key: string) {
 
 /** Pure formula — keep in sync with frontend `lib/utils/strengthScore.ts`. */
 export function calculateStrengthScore(input: StrengthScoreInputs): StrengthScoreBreakdown {
-  // Academics — max 25 (GPA 3.0→0 … 4.0→25)
+  // Academics — max 25 (GPA 3.0→0 … 4.0→25). Only when GPA is staff-verified.
   const gpa = Number(input.gpa);
-  const academics = Number.isFinite(gpa) ? Math.round(scale(gpa, 3.0, 4.0, 25)) : 0;
+  const academics =
+    input.gpaVerified && Number.isFinite(gpa) ? Math.round(scale(gpa, 3.0, 4.0, 25)) : 0;
 
-  // DAT — max 30 (prefer AA; fallback overall). 17→0 … 25→30
+  // DAT — max 30 (prefer AA; fallback overall). 17→0 … 25→30. Only when DAT is staff-verified.
   const dat = Number(input.datAa ?? input.datScore);
-  let datPts = Number.isFinite(dat) ? Math.round(scale(dat, 17, 25, 30)) : 0;
-  if (input.datVerified && datPts > 0) {
-    datPts = Math.min(30, datPts + 2);
-  }
+  const datPts =
+    input.datVerified && Number.isFinite(dat) ? Math.round(scale(dat, 17, 25, 30)) : 0;
 
   // Experience hours — max 25
   const h = input.hoursByCategory || {};
@@ -81,8 +83,8 @@ export function calculateStrengthScore(input: StrengthScoreInputs): StrengthScor
   const lorGot = Number(input.lorReceivedApprox || 0);
   readiness += Math.round(scale(lorGot, 0, lorRequired, 4));
 
-  // Mild reapplicant penalty if no compensating DAT yet
-  if (input.isReapplicant && (!Number.isFinite(dat) || dat < 20)) {
+  // Mild reapplicant penalty if no compensating verified DAT yet
+  if (input.isReapplicant && (!input.datVerified || !Number.isFinite(dat) || dat < 20)) {
     readiness = Math.max(0, readiness - 2);
   }
   readiness = clamp(readiness, 0, 10);
