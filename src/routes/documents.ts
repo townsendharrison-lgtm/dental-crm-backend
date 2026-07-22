@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { supabaseAdmin } from '../config/supabase.js';
 import { authenticate, AuthRequest } from '../middleware/auth.js';
 import multer from 'multer';
+import { recalculateStudentStrengthScore } from '../services/recalculateStrengthScore.js';
 
 const router = Router();
 
@@ -133,6 +134,7 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
       }
     }
 
+    void recalculateStudentStrengthScore(targetStudentId);
     res.status(201).json(document);
   } catch (error: any) {
     console.error('Upload document error:', error);
@@ -386,6 +388,7 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
       return res.status(500).json({ error: dbError.message });
     }
 
+    void recalculateStudentStrengthScore(document.student_id);
     res.json({ message: 'Document and file deleted successfully' });
   } catch (error: any) {
     console.error('Delete document error:', error);

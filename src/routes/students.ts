@@ -23,6 +23,7 @@ async function getOrCreateStudentProfile(userId: string) {
         status: 'Preparing',
         is_reapplicant: false,
         dat_verified: false,
+        gpa_verified: false,
         lor_required: 0,
         lor_external_service: false,
       })
@@ -152,6 +153,11 @@ router.get('/:id', authenticate, async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ error: 'You are not assigned to this student' });
     }
 
+    // Refresh auto strength score on read so it stays current
+    const { recalculateStudentStrengthScore } = await import('../services/recalculateStrengthScore.js');
+    const strengthScore = await recalculateStudentStrengthScore(id);
+    profile = { ...profile, strength_score: strengthScore };
+
     res.json({
       ...user,
       profile
@@ -241,13 +247,14 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
     });
 
     // Student specific restrictions:
-    // Students cannot change mentor assignment, progress, strength score, readiness, or DAT verification status
+    // Students cannot change mentor assignment, progress, readiness, or DAT verification status
+    // strength_score is ALWAYS formula-driven — never accept client writes
     if (requesterRole === 'ADMIN' || requesterRole === 'MENTOR_MANAGER' || requesterRole === 'MENTOR') {
       if (updates.readiness !== undefined) dbUpdates.readiness = updates.readiness;
       if (updates.progress !== undefined) dbUpdates.progress = updates.progress;
-      if (updates.strength_score !== undefined) dbUpdates.strength_score = updates.strength_score;
       if (updates.status !== undefined) dbUpdates.status = updates.status;
       if (updates.dat_verified !== undefined) dbUpdates.dat_verified = updates.dat_verified;
+      if (updates.gpa_verified !== undefined) dbUpdates.gpa_verified = updates.gpa_verified;
       if (updates.last_meeting_date !== undefined) dbUpdates.last_meeting_date = updates.last_meeting_date;
       if (updates.next_meeting_date !== undefined) dbUpdates.next_meeting_date = updates.next_meeting_date;
       if (updates.last_contact_date !== undefined) dbUpdates.last_contact_date = updates.last_contact_date;
@@ -275,6 +282,29 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
       return res.status(500).json({ error: updateError.message });
     }
 
+    // Snapshot DAT history when scores change
+    if (
+      updates.dat_score !== undefined ||
+      updates.dat_aa !== undefined ||
+      updates.dat_ts !== undefined
+    ) {
+      const { recordDatHistoryIfChanged } = await import('../services/datHistory.js');
+      await recordDatHistoryIfChanged(
+        id,
+        {
+          dat_score: existingProfile.dat_score,
+          dat_aa: existingProfile.dat_aa,
+          dat_ts: existingProfile.dat_ts,
+        },
+        {
+          dat_score: updatedProfile.dat_score,
+          dat_aa: updatedProfile.dat_aa,
+          dat_ts: updatedProfile.dat_ts,
+        },
+        requesterId,
+      );
+    }
+
     // Optional: Update name or avatar in user table if provided (Admins or Student self)
     if (requesterRole === 'ADMIN' || requesterId === id) {
       const userUpdates: any = {};
@@ -296,13 +326,82 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
       .eq('id', id)
       .single();
 
+    const { recalculateStudentStrengthScore } = await import('../services/recalculateStrengthScore.js');
+    const strengthScore = await recalculateStudentStrengthScore(id);
+
     res.json({
       ...user,
-      profile: updatedProfile
+      profile: { ...updatedProfile, strength_score: strengthScore },
     });
   } catch (error: any) {
     console.error('Error updating student profile:', error);
     res.status(500).json({ error: error.message || 'Server error updating student' });
+  }
+});
+
+// GET /api/students/:id/dat-history — DAT score snapshots over time
+router.get('/:id/dat-history', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const requesterId = req.user?.id;
+    const requesterRole = req.user?.role;
+
+    if (!requesterId) return res.status(401).json({ error: 'Unauthorized' });
+
+    if (requesterRole === 'STUDENT' && requesterId !== id) {
+      return res.status(403).json({ error: 'You can only access your own profile' });
+    }
+
+    let profile;
+    try {
+      profile = await getOrCreateStudentProfile(id);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    if (requesterRole === 'MENTOR' && profile.mentor_id !== requesterId) {
+      return res.status(403).json({ error: 'You are not assigned to this student' });
+    }
+
+    const { listDatHistory } = await import('../services/datHistory.js');
+    const history = await listDatHistory(id);
+    res.json({ history });
+  } catch (error: any) {
+    console.error('Error fetching DAT history:', error);
+    res.status(500).json({ error: error.message || 'Server error fetching DAT history' });
+  }
+});
+
+// GET /api/students/:id/strength-history — strength score snapshots over time
+router.get('/:id/strength-history', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const requesterId = req.user?.id;
+    const requesterRole = req.user?.role;
+
+    if (!requesterId) return res.status(401).json({ error: 'Unauthorized' });
+
+    if (requesterRole === 'STUDENT' && requesterId !== id) {
+      return res.status(403).json({ error: 'You can only access your own profile' });
+    }
+
+    let profile;
+    try {
+      profile = await getOrCreateStudentProfile(id);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    if (requesterRole === 'MENTOR' && profile.mentor_id !== requesterId) {
+      return res.status(403).json({ error: 'You are not assigned to this student' });
+    }
+
+    const { listStrengthHistory } = await import('../services/strengthHistory.js');
+    const history = await listStrengthHistory(id);
+    res.json({ history });
+  } catch (error: any) {
+    console.error('Error fetching strength history:', error);
+    res.status(500).json({ error: error.message || 'Server error fetching strength history' });
   }
 });
 

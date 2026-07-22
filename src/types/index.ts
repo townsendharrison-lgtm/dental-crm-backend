@@ -69,6 +69,7 @@ export interface StudentProfile {
   gender?: string | null;
   age?: number | null;
   dat_verified: boolean;
+  gpa_verified?: boolean;
   undergrad_institution?: string | null;
   undergrad_degree?: string | null;
   undergrad_grad_year?: string | null;

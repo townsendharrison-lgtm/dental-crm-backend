@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { supabaseAdmin } from '../config/supabase.js';
 import { authenticate, AuthRequest } from '../middleware/auth.js';
+import { recalculateStudentStrengthScore } from '../services/recalculateStrengthScore.js';
 
 const router = Router();
 
@@ -199,6 +200,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: error.message });
     }
 
+    void recalculateStudentStrengthScore(targetStudentId);
     res.status(201).json(newExperience);
   } catch (error: any) {
     console.error('Create experience error:', error);
@@ -267,6 +269,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: error.message });
     }
 
+    void recalculateStudentStrengthScore(existing.student_id);
     res.json(updated);
   } catch (error: any) {
     console.error('Update experience error:', error);
@@ -320,6 +323,7 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
       return res.status(500).json({ error: error.message });
     }
 
+    void recalculateStudentStrengthScore(existing.student_id);
     res.json({ message: 'Experience profile deleted successfully' });
   } catch (error: any) {
     console.error('Delete experience error:', error);
@@ -386,6 +390,7 @@ router.post('/:experienceId/sessions', async (req: AuthRequest, res: Response) =
       return res.status(400).json({ error: error.message });
     }
 
+    void recalculateStudentStrengthScore(exp.student_id);
     res.status(201).json(newSession);
   } catch (error: any) {
     console.error('Create experience session error:', error);
@@ -449,6 +454,7 @@ router.put('/:experienceId/sessions/:sessionId', async (req: AuthRequest, res: R
       return res.status(400).json({ error: error.message });
     }
 
+    void recalculateStudentStrengthScore(exp.student_id);
     res.json(updatedSession);
   } catch (error: any) {
     console.error('Update experience session error:', error);
@@ -504,6 +510,7 @@ router.delete('/:experienceId/sessions/:sessionId', async (req: AuthRequest, res
       return res.status(500).json({ error: error.message });
     }
 
+    void recalculateStudentStrengthScore(exp.student_id);
     res.json({ message: 'Experience session deleted successfully' });
   } catch (error: any) {
     console.error('Delete experience session error:', error);
