@@ -435,6 +435,68 @@ router.get('/:id/strength-history', authenticate, async (req: AuthRequest, res: 
   }
 });
 
+// GET /api/students/:id/strength-percentile — peer rank from live strength scores
+router.get('/:id/strength-percentile', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const requesterId = req.user?.id;
+    const requesterRole = req.user?.role;
+
+    if (!requesterId) return res.status(401).json({ error: 'Unauthorized' });
+
+    if (requesterRole === 'STUDENT' && requesterId !== id) {
+      return res.status(403).json({ error: 'You can only access your own profile' });
+    }
+
+    let profile;
+    try {
+      profile = await getOrCreateStudentProfile(id);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    if (requesterRole === 'MENTOR' && profile.mentor_id !== requesterId) {
+      return res.status(403).json({ error: 'You are not assigned to this student' });
+    }
+
+    const { recalculateStudentStrengthScore } = await import('../services/recalculateStrengthScore.js');
+    const myScore = Math.round(Number(await recalculateStudentStrengthScore(id)) || 0);
+
+    const { data: peers, error } = await supabaseAdmin
+      .from('student_profiles')
+      .select('id, strength_score');
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    const scores = (peers || [])
+      .map((p) => Math.round(Number(p.strength_score) || 0))
+      .filter((s) => Number.isFinite(s));
+
+    const cohortSize = scores.length;
+    const below = scores.filter((s) => s < myScore).length;
+    const equal = scores.filter((s) => s === myScore).length;
+    // Classic percentile rank: share of cohort strictly below + half of ties
+    const percentile =
+      cohortSize > 1
+        ? Math.round(((below + equal * 0.5) / cohortSize) * 100)
+        : null;
+    const aheadOf =
+      cohortSize > 1 ? Math.round((below / Math.max(cohortSize - 1, 1)) * 100) : null;
+
+    res.json({
+      strengthScore: myScore,
+      cohortSize,
+      percentile,
+      aheadOf,
+    });
+  } catch (error: any) {
+    console.error('Error computing strength percentile:', error);
+    res.status(500).json({ error: error.message || 'Server error computing percentile' });
+  }
+});
+
 // Notes + manual dexterity (Records tab)
 registerNotesDexterityRoutes(router);
 
