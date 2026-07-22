@@ -44,16 +44,22 @@ router.get('/profile', authenticate, async (req: AuthRequest, res: Response) => 
 router.put('/profile', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     const { name, avatar, weeklyLeadGoal, monthlyLeadGoal } = req.body;
+    const updates: Record<string, unknown> = {
+      updated_at: new Date().toISOString(),
+    };
+
+    if (typeof name === 'string' && name.trim()) updates.name = name.trim();
+    if (avatar !== undefined) updates.avatar = avatar;
+    if (weeklyLeadGoal !== undefined) updates.weekly_lead_goal = weeklyLeadGoal;
+    if (monthlyLeadGoal !== undefined) updates.monthly_lead_goal = monthlyLeadGoal;
+
+    if (Object.keys(updates).length === 1) {
+      return res.status(400).json({ error: 'No valid profile fields to update' });
+    }
 
     const { data: user, error } = await supabaseAdmin
       .from('users')
-      .update({
-        name,
-        avatar,
-        weekly_lead_goal: weeklyLeadGoal,
-        monthly_lead_goal: monthlyLeadGoal,
-        updated_at: new Date().toISOString(),
-      })
+      .update(updates)
       .eq('id', req.user!.id)
       .select()
       .single();

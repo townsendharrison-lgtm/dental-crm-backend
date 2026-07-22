@@ -250,7 +250,7 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
       'application_cycle', 'state', 'country', 'ethnicity', 'gender', 'age',
       'undergrad_institution', 'undergrad_degree', 'undergrad_grad_year',
       'post_bac', 'masters', 'lor_required', 'lor_external_service', 'timezone',
-      'school_categories',
+      'school_categories', 'month_colors',
     ];
 
     commonFields.forEach(field => {
@@ -259,9 +259,12 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
       }
     });
 
-    // Accept camelCase schoolCategories from the frontend
+    // Accept camelCase schoolCategories / monthColors from the frontend
     if (updates.schoolCategories !== undefined && updates.school_categories === undefined) {
       dbUpdates.school_categories = updates.schoolCategories;
+    }
+    if (updates.monthColors !== undefined && updates.month_colors === undefined) {
+      dbUpdates.month_colors = updates.monthColors;
     }
 
     // If GPA/DAT values change without an explicit re-verify, clear verification
