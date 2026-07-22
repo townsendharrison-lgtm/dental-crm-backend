@@ -526,14 +526,9 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
         }
         dbUpdates.audience = nextAudience;
         dbUpdates.type = updates.type || typeForAudience(nextAudience);
+        // Broadcast / staff meetings are not tied to a single student
         if (nextAudience === 'MENTORS' || nextAudience === 'GLOBAL' || nextAudience === 'STAFF') {
-          if (nextAudience !== 'STUDENT' && nextAudience !== 'ADMIN_DIRECT') {
-            // STAFF and broadcasts have no student
-            if (nextAudience !== 'ADMIN_DIRECT') dbUpdates.student_id = null;
-          }
-          if (nextAudience === 'MENTORS' || nextAudience === 'GLOBAL' || nextAudience === 'STAFF') {
-            dbUpdates.student_id = null;
-          }
+          dbUpdates.student_id = null;
         }
       } else if (updates.type !== undefined) {
         dbUpdates.type = updates.type;

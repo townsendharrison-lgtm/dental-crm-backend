@@ -9,7 +9,7 @@ export type MeetingAudience =
   | 'STAFF' // 4. Mentor ↔ mentor manager (+ optional staff invites, no students)
   | 'GLOBAL'; // 5. Webinar — everyone; admin-only create
 
-type MeetingRow = {
+export type MeetingRow = {
   id: string;
   title?: string | null;
   date: string;
@@ -21,7 +21,13 @@ type MeetingRow = {
   audience?: MeetingAudience | string | null;
 };
 
-export function normalizeAudience(m: MeetingRow): MeetingAudience {
+/** Fields actually read by normalizeAudience (id/date not required). */
+export type MeetingAudienceSource = Pick<
+  MeetingRow,
+  'audience' | 'type' | 'student_id'
+>;
+
+export function normalizeAudience(m: MeetingAudienceSource): MeetingAudience {
   const a = m.audience;
   if (
     a === 'ADMIN_DIRECT' ||

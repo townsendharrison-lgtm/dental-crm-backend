@@ -113,10 +113,11 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// POST /api/staff-tasks - Create a new staff task (Admin only)
-router.post('/', authorize('ADMIN'), async (req: AuthRequest, res: Response) => {
+// POST /api/staff-tasks - Create a staff task (Admin / Manager / Mentor)
+router.post('/', authorize('ADMIN', 'MENTOR_MANAGER', 'MENTOR'), async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
+    const role = req.user!.role;
     const {
       assignedTo,
       task,
@@ -131,6 +132,11 @@ router.post('/', authorize('ADMIN'), async (req: AuthRequest, res: Response) => 
       return res.status(400).json({ error: 'assignedTo, task, and dueDate are required' });
     }
 
+    // Mentors can only assign tasks to themselves
+    if (role === 'MENTOR' && assignedTo !== userId) {
+      return res.status(403).json({ error: 'Mentors can only create tasks assigned to themselves' });
+    }
+
     // Verify assignee exists
     const { data: assignee, error: aErr } = await supabaseAdmin
       .from('users')
@@ -142,8 +148,26 @@ router.post('/', authorize('ADMIN'), async (req: AuthRequest, res: Response) => 
       return res.status(404).json({ error: 'Assignee user not found' });
     }
 
-    if (assignee.role !== 'MENTOR' && assignee.role !== 'MENTOR_MANAGER') {
-      return res.status(400).json({ error: 'Tasks can only be assigned to Mentors or Mentor Managers' });
+    if (
+      assignee.role !== 'MENTOR' &&
+      assignee.role !== 'MENTOR_MANAGER' &&
+      assignee.role !== 'ADMIN'
+    ) {
+      return res.status(400).json({
+        error: 'Tasks can only be assigned to Mentors, Mentor Managers, or Admins',
+      });
+    }
+
+    // Mentors may only attach tasks to their assigned students
+    if (role === 'MENTOR' && studentId) {
+      const { data: profile } = await supabaseAdmin
+        .from('student_profiles')
+        .select('mentor_id')
+        .eq('id', studentId)
+        .maybeSingle();
+      if (!profile || profile.mentor_id !== userId) {
+        return res.status(403).json({ error: 'You are not assigned to this student' });
+      }
     }
 
     const { data: newTask, error } = await supabaseAdmin
