@@ -198,6 +198,78 @@ router.delete('/unregister-token', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ─── POST /api/notifications/nudge ────────────────────────────────────
+// Admin/Manager: send a targeted in-app nudge to a specific user (e.g. mentor)
+router.post('/nudge', authorize('ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { userId, title, message, type = 'WARNING' } = req.body as {
+      userId?: string;
+      title?: string;
+      message?: string;
+      type?: 'INFO' | 'WARNING' | 'URGENT';
+    };
+
+    if (!userId || !title?.trim() || !message?.trim()) {
+      return res.status(400).json({ error: 'userId, title, and message are required' });
+    }
+
+    const allowedTypes = ['INFO', 'WARNING', 'URGENT'];
+    const notifType = allowedTypes.includes(type) ? type : 'WARNING';
+
+    const { data: target, error: userErr } = await supabaseAdmin
+      .from('users')
+      .select('id, name, role')
+      .eq('id', userId)
+      .maybeSingle();
+
+    if (userErr || !target) {
+      return res.status(404).json({ error: 'Target user not found' });
+    }
+
+    const { data: row, error: insertError } = await supabaseAdmin
+      .from('notifications')
+      .insert({
+        user_id: userId,
+        title: title.trim(),
+        message: message.trim(),
+        type: notifType,
+        category: 'NUDGE',
+        related_id: `nudge:${req.user!.id}:${Date.now()}`,
+        is_read: false,
+        created_by: req.user!.id,
+      })
+      .select('*')
+      .single();
+
+    if (insertError) {
+      return res.status(500).json({ error: insertError.message });
+    }
+
+    if (messaging) {
+      const { data: tokens } = await supabaseAdmin
+        .from('fcm_tokens')
+        .select('token')
+        .eq('user_id', userId);
+      if (tokens && tokens.length > 0) {
+        try {
+          await messaging.sendEachForMulticast({
+            tokens: tokens.map((t: { token: string }) => t.token),
+            notification: { title: title.trim(), body: message.trim().slice(0, 180) },
+            data: { type: 'NUDGE' },
+          });
+        } catch (fcmError) {
+          console.error('Nudge FCM error:', fcmError);
+        }
+      }
+    }
+
+    res.status(201).json({ success: true, notification: row, target });
+  } catch (error: any) {
+    console.error('Nudge error:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
 // ─── POST /api/notifications/broadcast ────────────────────────────────
 // Admin/Manager: send a system alert to all users matching targetRole
 router.post('/broadcast', authorize('ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res: Response) => {
