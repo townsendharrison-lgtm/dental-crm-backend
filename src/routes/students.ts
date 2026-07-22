@@ -425,6 +425,101 @@ router.get('/:id/strength-history', authenticate, async (req: AuthRequest, res: 
 // Notes + manual dexterity (Records tab)
 registerNotesDexterityRoutes(router);
 
+// GET /api/students/:id/export.pdf — PDF profile export
+router.get('/:id/export.pdf', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const requesterId = req.user?.id;
+    const requesterRole = req.user?.role;
+    if (!requesterId || !requesterRole) return res.status(401).json({ error: 'Unauthorized' });
+
+    const {
+      assertCanManageStudentShare,
+      loadStudentPublicSnapshot,
+    } = await import('../services/studentProfileShare.js');
+    await assertCanManageStudentShare(requesterId, requesterRole, id);
+
+    const snapshot = await loadStudentPublicSnapshot(id);
+    const { buildStudentProfilePdf } = await import('../services/studentProfilePdf.js');
+    const pdf = await buildStudentProfilePdf({
+      student: snapshot.student,
+      experiences: snapshot.experiences,
+      documents: snapshot.documents,
+      dexterity: snapshot.dexterity,
+    });
+
+    const safeName = (snapshot.student.name || 'student').replace(/[^\w\-]+/g, '_');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeName}_profile.pdf"`);
+    res.send(pdf);
+  } catch (error: any) {
+    const status = error?.status || 500;
+    console.error('Error exporting student PDF:', error);
+    res.status(status).json({ error: error.message || 'Server error exporting PDF' });
+  }
+});
+
+// POST /api/students/:id/share — create or reuse an active public share link
+router.post('/:id/share', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const requesterId = req.user?.id;
+    const requesterRole = req.user?.role;
+    if (!requesterId || !requesterRole) return res.status(401).json({ error: 'Unauthorized' });
+
+    const {
+      assertCanManageStudentShare,
+      createShareToken,
+      loadStudentPublicSnapshot,
+    } = await import('../services/studentProfileShare.js');
+    await assertCanManageStudentShare(requesterId, requesterRole, id);
+    // Ensure student exists
+    await loadStudentPublicSnapshot(id);
+
+    const { data: existing } = await supabaseAdmin
+      .from('student_profile_shares')
+      .select('*')
+      .eq('student_id', id)
+      .eq('is_active', true)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    let share = existing;
+    if (!share) {
+      const token = createShareToken();
+      const { data: created, error } = await supabaseAdmin
+        .from('student_profile_shares')
+        .insert({
+          student_id: id,
+          token,
+          created_by: requesterId,
+          is_active: true,
+        })
+        .select('*')
+        .single();
+      if (error) return res.status(500).json({ error: error.message });
+      share = created;
+    }
+
+    const frontendBase =
+      process.env.FRONTEND_URL ||
+      process.env.NEXT_PUBLIC_APP_URL ||
+      'http://localhost:3000';
+    const shareUrl = `${frontendBase.replace(/\/$/, '')}/share/students/${share.token}`;
+
+    res.json({
+      token: share.token,
+      shareUrl,
+      createdAt: share.created_at,
+    });
+  } catch (error: any) {
+    const status = error?.status || 500;
+    console.error('Error creating student share link:', error);
+    res.status(status).json({ error: error.message || 'Server error creating share link' });
+  }
+});
+
 // DELETE /api/students/:id - Delete a student user (Admin only)
 router.delete('/:id', authenticate, authorize('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
