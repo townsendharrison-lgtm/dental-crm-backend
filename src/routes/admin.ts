@@ -8,12 +8,12 @@ import { buildPlatformAnalytics } from '../services/platformAnalytics.js';
 
 const router = Router();
 
-// All admin routes require admin role
-router.use(authenticate, authorize('ADMIN'));
+// Authenticate all admin routes; most require ADMIN, analytics also allows MENTOR_MANAGER
+router.use(authenticate);
 
 // ─── GET /api/admin/analytics ────────────────────────────────────────
-// Platform-wide Global Data aggregations for the admin analytics page
-router.get('/analytics', async (_req: AuthRequest, res: Response) => {
+// Platform-wide Global Data aggregations (Admin + Mentor Manager)
+router.get('/analytics', authorize('ADMIN', 'MENTOR_MANAGER'), async (_req: AuthRequest, res: Response) => {
   try {
     const [
       { data: studentUsers, error: studentsError },
@@ -63,6 +63,9 @@ router.get('/analytics', async (_req: AuthRequest, res: Response) => {
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
+
+// Remaining admin routes are ADMIN-only
+router.use(authorize('ADMIN'));
 
 // Invite user using Supabase built-in invite
 router.post('/invite', async (req: AuthRequest, res: Response) => {
