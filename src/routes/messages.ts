@@ -1,9 +1,27 @@
-import { Router, Response } from 'express';
+import { Router, Response, NextFunction } from 'express';
+import multer from 'multer';
 import { supabaseAdmin } from '../config/supabase.js';
 import { authenticate, AuthRequest } from '../middleware/auth.js';
 import { messaging } from '../config/firebase.js';
+import { extractFirstUrl, fetchLinkPreview } from '../services/linkPreview.js';
+import { dismissRelatedNotifications } from '../services/dismissNotifications.js';
 
 const router = Router();
+
+const messageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const allowed = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif'];
+    if (allowed.includes(file.mimetype)) cb(null, true);
+    else cb(new Error('Invalid file type. Use PNG, JPG, WebP, or GIF.'));
+  },
+});
+
+function attachmentFileName(conversationId: string, userId: string, originalName: string) {
+  const ext = (originalName.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return `${conversationId}/${userId}/${Date.now()}.${ext || 'jpg'}`;
+}
 
 // All routes require authentication
 router.use(authenticate);
@@ -270,16 +288,25 @@ router.get('/:id/messages', async (req: AuthRequest, res: Response) => {
 });
 
 // ─── POST /api/conversations/:id/messages ─────────────────────────────
-// Send a message in a conversation + Trigger Push & In-app notifications
-router.post('/:id/messages', async (req: AuthRequest, res: Response) => {
+// Send a message (text and/or image) + Trigger Push & In-app notifications
+router.post('/:id/messages', (req: AuthRequest, res: Response, next: NextFunction) => {
+  messageUpload.single('file')(req, res, (err: unknown) => {
+    if (err) {
+      const message = err instanceof Error ? err.message : 'File upload failed';
+      return res.status(400).json({ error: message });
+    }
+    next();
+  });
+}, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const senderEmail = req.user!.email;
     const { id } = req.params;
-    const { text } = req.body;
+    const rawText = typeof req.body?.text === 'string' ? req.body.text : '';
+    const text = rawText.trim();
+    const file = req.file;
 
-    if (!text || text.trim() === '') {
-      return res.status(400).json({ error: 'Message text is required' });
+    if (!text && !file) {
+      return res.status(400).json({ error: 'Message text or image is required' });
     }
 
     // 1. Verify user participates
@@ -306,14 +333,51 @@ router.post('/:id/messages', async (req: AuthRequest, res: Response) => {
 
     const senderName = senderUser?.name || 'Someone';
 
+    let attachmentUrl: string | null = null;
+    let attachmentType: string | null = null;
+    let attachmentName: string | null = null;
+
+    if (file) {
+      const filePath = attachmentFileName(id, userId, file.originalname);
+      const { error: uploadError } = await supabaseAdmin.storage
+        .from('message-attachments')
+        .upload(filePath, file.buffer, {
+          contentType: file.mimetype,
+          upsert: false,
+        });
+
+      if (uploadError) {
+        console.error('Message attachment upload error:', uploadError.message);
+        return res.status(500).json({ error: 'Image upload failed: ' + uploadError.message });
+      }
+
+      const { data: publicData } = supabaseAdmin.storage
+        .from('message-attachments')
+        .getPublicUrl(filePath);
+      attachmentUrl = publicData.publicUrl;
+      attachmentType = file.mimetype;
+      attachmentName = file.originalname;
+    }
+
+    // Best-effort Open Graph preview for the first URL in the caption/text
+    let linkPreview = null;
+    const firstUrl = extractFirstUrl(text);
+    if (firstUrl) {
+      linkPreview = await fetchLinkPreview(firstUrl);
+    }
+
     // 2. Insert message
     const { data: message, error: msgErr } = await supabaseAdmin
       .from('messages')
       .insert({
         conversation_id: id,
         sender_id: userId,
-        text: text,
-        read_by: [userId] // Sender has read their own message
+        text: text || '',
+        attachment_url: attachmentUrl,
+        attachment_type: attachmentType,
+        attachment_name: attachmentName,
+        link_preview: linkPreview,
+        read_by: [userId], // Sender has read their own message
       })
       .select()
       .single();
@@ -322,15 +386,24 @@ router.post('/:id/messages', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: msgErr.message });
     }
 
+    const notificationBody = text
+      ? text
+      : attachmentUrl
+        ? 'Sent an image'
+        : 'New message';
+
     // 3. Process Notifications for all other participants
     const recipients = conv.participant_ids.filter((pId: string) => pId !== userId);
 
     if (recipients.length > 0) {
       // a. Insert In-App Notification
+      const inboxTitle = conv.is_group
+        ? `Inbox: ${conv.name || 'Group'}`
+        : `Inbox: ${senderName}`;
       const notificationRows = recipients.map((rId: string) => ({
         user_id: rId,
-        title: conv.is_group ? `New message in ${conv.name || 'Group'}` : `💬 New Message`,
-        message: conv.is_group ? `${senderName}: ${text}` : `${senderName}: ${text}`,
+        title: inboxTitle,
+        message: notificationBody,
         type: 'INFO' as const,
         category: 'NEW_MESSAGE',
         related_id: id,
@@ -357,8 +430,10 @@ router.post('/:id/messages', async (req: AuthRequest, res: Response) => {
           console.error('Failed to retrieve recipient FCM tokens:', tErr.message);
         } else if (tokens && tokens.length > 0) {
           const tokenStrings = tokens.map((t: { token: string }) => t.token);
-          const pushTitle = conv.is_group ? conv.name || 'Group Chat' : senderName;
-          const pushBody = text.substring(0, 200);
+          const pushTitle = conv.is_group
+            ? `Inbox: ${conv.name || 'Group Chat'}`
+            : `Inbox: ${senderName}`;
+          const pushBody = notificationBody.substring(0, 200);
 
           try {
             const response = await messaging.sendEachForMulticast({
@@ -467,8 +542,8 @@ router.post('/:id/messages', async (req: AuthRequest, res: Response) => {
 
               await supabaseAdmin.from('notifications').insert({
                 user_id: userId,
-                title: `💬 Auto-Reply from ${otherUser.name || 'Advisor'}`,
-                message: autoReplyText.substring(0, 80),
+                title: `Inbox: ${otherUser.name || 'Advisor'}`,
+                message: autoReplyText,
                 type: 'INFO',
                 category: 'NEW_MESSAGE',
                 related_id: id,
@@ -543,6 +618,13 @@ router.post('/:id/read', async (req: AuthRequest, res: Response) => {
       // Let's create the RPC SQL function in the migration file to be safe.
       console.warn('RPC mark_messages_read_by_user failed:', updateErr.message);
     }
+
+    // Opening/reading the thread clears inbox message alerts for this conversation
+    await dismissRelatedNotifications({
+      category: 'NEW_MESSAGE',
+      relatedId: id,
+      userId,
+    });
 
     res.json({ success: true });
   } catch (error: any) {

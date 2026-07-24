@@ -227,10 +227,8 @@ export async function executeDueWorkflowActions(): Promise<{ executedCount: numb
 
     await supabaseAdmin.from('notifications').insert({
       user_id: studentId,
-      title: '💬 New Message',
-      message: `${senderName}: ${formattedText.substring(0, 60)}${
-        formattedText.length > 60 ? '...' : ''
-      }`,
+      title: `Inbox: ${senderName}`,
+      message: formattedText,
       type: 'INFO',
       category: 'NEW_MESSAGE',
       related_id: conversationId,

@@ -1,6 +1,10 @@
 import { Router, Response } from 'express';
 import { supabaseAdmin } from '../config/supabase.js';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth.js';
+import {
+  dismissRelatedNotifications,
+  dismissRelatedNotificationsMany,
+} from '../services/dismissNotifications.js';
 
 const router = Router();
 
@@ -395,6 +399,17 @@ router.post('/assign', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), async
       .eq('status', 'PENDING')
       .maybeSingle();
 
+    // Clear stale action-required alerts for this student (prior pending / declines)
+    const { data: priorAssignments } = await supabaseAdmin
+      .from('student_assignments')
+      .select('id')
+      .eq('student_id', studentId)
+      .in('status', ['PENDING', 'DECLINED']);
+    await dismissRelatedNotificationsMany(
+      'ASSIGNMENT',
+      (priorAssignments || []).map((a) => a.id),
+    );
+
     let assignment;
     if (existingPending) {
       const { data, error } = await supabaseAdmin
@@ -515,6 +530,16 @@ router.post('/transfer', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), asy
     }
 
     // Replace any existing pending with the transfer target
+    const { data: pendingToClear } = await supabaseAdmin
+      .from('student_assignments')
+      .select('id')
+      .eq('student_id', studentId)
+      .eq('status', 'PENDING');
+    await dismissRelatedNotificationsMany(
+      'ASSIGNMENT',
+      (pendingToClear || []).map((a) => a.id),
+    );
+
     await supabaseAdmin
       .from('student_assignments')
       .delete()
@@ -596,6 +621,17 @@ router.post('/unassign', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), asy
     }
 
     // Cancel pending proposals for this student
+    const { data: pendingRows } = await supabaseAdmin
+      .from('student_assignments')
+      .select('id')
+      .eq('student_id', studentId)
+      .eq('status', 'PENDING');
+
+    await dismissRelatedNotificationsMany(
+      'ASSIGNMENT',
+      (pendingRows || []).map((a) => a.id),
+    );
+
     await supabaseAdmin
       .from('student_assignments')
       .update({ status: 'DECLINED' })
@@ -676,6 +712,21 @@ router.post('/assignments/:assignmentId/accept', authenticate, authorize('MENTOR
 
     if (linkErr) return res.status(500).json({ error: linkErr.message });
 
+    // Clear mentor pending alert + any staff "please reassign" alerts for this student
+    await dismissRelatedNotifications({
+      category: 'ASSIGNMENT',
+      relatedId: assignmentId,
+    });
+    const { data: declinedRows } = await supabaseAdmin
+      .from('student_assignments')
+      .select('id')
+      .eq('student_id', assignment.student_id)
+      .eq('status', 'DECLINED');
+    await dismissRelatedNotificationsMany(
+      'ASSIGNMENT',
+      (declinedRows || []).map((a) => a.id),
+    );
+
     res.json({ message: 'Assignment accepted', assignment: updated });
   } catch (error: any) {
     console.error('Error accepting assignment:', error);
@@ -714,6 +765,13 @@ router.post('/assignments/:assignmentId/decline', authenticate, authorize('MENTO
       .single();
 
     if (uErr) return res.status(500).json({ error: uErr.message });
+
+    // Remove the mentor's pending assignment notification
+    await dismissRelatedNotifications({
+      category: 'ASSIGNMENT',
+      relatedId: assignmentId,
+      userId: assignment.mentor_id || undefined,
+    });
 
     // Notify admins + managers
     const { data: staff } = await supabaseAdmin

@@ -10,6 +10,7 @@ import {
   isHiddenFromMentorManager,
   type MeetingAudience,
 } from '../services/meetingNotifications.js';
+import { dismissRelatedNotifications } from '../services/dismissNotifications.js';
 
 const router = Router();
 router.use(authenticate);
@@ -557,9 +558,13 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 
     // Completing a meeting often also normalizes title/date/duration — that is not a reschedule.
     const becomingCompleted = !existing.completed && !!updated.completed;
-    if (
+    if (becomingCompleted) {
+      await dismissRelatedNotifications({
+        category: 'MEETING',
+        relatedId: id,
+      });
+    } else if (
       role !== 'STUDENT' &&
-      !becomingCompleted &&
       meetingScheduleFieldsChanged(existing, updated)
     ) {
       void notifyMeetingParties({
@@ -604,6 +609,11 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
 
     const { error } = await supabaseAdmin.from('meetings').delete().eq('id', id);
     if (error) return res.status(500).json({ error: error.message });
+
+    await dismissRelatedNotifications({
+      category: 'MEETING',
+      relatedId: id,
+    });
 
     void notifyMeetingParties({
       meeting: existing,

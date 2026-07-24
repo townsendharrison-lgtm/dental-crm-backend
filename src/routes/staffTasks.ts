@@ -259,9 +259,12 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// DELETE /api/staff-tasks/:id - Delete a staff task (Admin only)
-router.delete('/:id', authorize('ADMIN'), async (req: AuthRequest, res: Response) => {
+// DELETE /api/staff-tasks/:id - Delete a staff task
+// Admins can delete any task; others can delete tasks they created.
+router.delete('/:id', authorize('ADMIN', 'MENTOR_MANAGER', 'MENTOR'), async (req: AuthRequest, res: Response) => {
   try {
+    const userId = req.user!.id;
+    const role = req.user!.role;
     const { id } = req.params;
 
     const { data: existing, error: fetchErr } = await supabaseAdmin
@@ -272,6 +275,11 @@ router.delete('/:id', authorize('ADMIN'), async (req: AuthRequest, res: Response
 
     if (fetchErr || !existing) {
       return res.status(404).json({ error: 'Staff task not found' });
+    }
+
+    const isCreator = existing.assigned_by === userId;
+    if (role !== 'ADMIN' && !isCreator) {
+      return res.status(403).json({ error: 'You can only delete tasks you created' });
     }
 
     const { error } = await supabaseAdmin

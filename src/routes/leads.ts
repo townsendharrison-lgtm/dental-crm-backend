@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { supabaseAdmin } from '../config/supabase.js';
 import { authenticate, AuthRequest } from '../middleware/auth.js';
+import { dismissRelatedNotifications } from '../services/dismissNotifications.js';
 
 const router = Router();
 
@@ -116,6 +117,18 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
       return res.status(500).json({ error: error.message });
     }
 
+    // Contacted / paid / showed-up means the new-lead alert has been handled
+    if (
+      updates.contacted === true ||
+      updates.isPaid === true ||
+      updates.showedUp === true
+    ) {
+      await dismissRelatedNotifications({
+        category: 'NEW_LEAD',
+        relatedId: id,
+      });
+    }
+
     res.json({ lead });
   } catch (error) {
     console.error('Server error updating lead:', error);
@@ -141,6 +154,11 @@ router.delete('/:id', authenticate, async (req: AuthRequest, res: Response) => {
       console.error('Error deleting lead:', error);
       return res.status(500).json({ error: error.message });
     }
+
+    await dismissRelatedNotifications({
+      category: 'NEW_LEAD',
+      relatedId: id,
+    });
 
     res.json({ message: 'Lead deleted successfully' });
   } catch (error) {

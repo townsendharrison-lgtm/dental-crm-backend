@@ -6,6 +6,7 @@ import { sendInitialEmail, sendDeclineReuploadEmail, sendTestEmail } from '../se
 import multer from 'multer';
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
+import { dismissRelatedNotifications } from '../services/dismissNotifications.js';
 
 const router = Router();
 
@@ -720,6 +721,12 @@ router.patch('/requests/:id/status', authenticate, authorize('ADMIN'), async (re
     if (updated?.student_id) {
       await notifyStudentLORReviewed(updated.student_id, updated.writer_name, status);
     }
+
+    // Clear admin "letter uploaded" action alerts now that review is done
+    await dismissRelatedNotifications({
+      category: 'LOR_UPLOADED',
+      relatedId: id,
+    });
 
     res.json({ request: updated });
   } catch (err) {

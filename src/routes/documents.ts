@@ -3,6 +3,7 @@ import { supabaseAdmin } from '../config/supabase.js';
 import { authenticate, AuthRequest } from '../middleware/auth.js';
 import multer from 'multer';
 import { recalculateStudentStrengthScore } from '../services/recalculateStrengthScore.js';
+import { dismissRelatedNotifications } from '../services/dismissNotifications.js';
 
 const router = Router();
 
@@ -336,6 +337,14 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
         related_id: id,
         created_by: userId
       });
+
+      // Mentor's "document uploaded" alert is done once reviewed
+      if (updates.status !== 'Pending Review') {
+        await dismissRelatedNotifications({
+          category: 'DOCUMENT_UPLOADED',
+          relatedId: id,
+        });
+      }
     }
 
     res.json(updated);
