@@ -155,8 +155,8 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       dentistType
     } = req.body;
 
-    if (!category || !title || !organization || !startDate) {
-      return res.status(400).json({ error: 'Category, title, organization, and start date are required' });
+    if (!category || !title || !startDate) {
+      return res.status(400).json({ error: 'Category, title, and start date are required' });
     }
 
     const targetStudentId = role === 'STUDENT' ? userId : studentId;
@@ -184,13 +184,13 @@ router.post('/', async (req: AuthRequest, res: Response) => {
         student_id: targetStudentId,
         category,
         title,
-        organization,
+        organization: organization || '',
         supervisor_name: supervisorName || null,
         supervisor_contact: supervisorContact || null,
         description: description || null,
         start_date: startDate,
         end_date: endDate || null,
-        is_ongoing: isOngoing,
+        is_ongoing: endDate ? false : !!isOngoing,
         dentist_type: dentistType || null
       })
       .select()

@@ -75,6 +75,20 @@ function mapDexterity(row: any) {
   };
 }
 
+function mapCredential(row: any) {
+  return {
+    id: row.id,
+    studentId: row.student_id,
+    kind: row.kind as 'LICENSE' | 'ACHIEVEMENT',
+    title: row.title,
+    issuer: row.issuer || '',
+    year: row.year || '',
+    description: row.description || '',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 function sanitizeTags(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
   return raw.filter((t) => typeof t === 'string' && NOTE_TAGS.has(t));
@@ -268,7 +282,6 @@ export function registerNotesDexterityRoutes(router: Router) {
       const isOngoing = !!(req.body?.isOngoing ?? req.body?.is_ongoing);
 
       if (!activity) return res.status(400).json({ error: 'Activity is required' });
-      if (!startDate) return res.status(400).json({ error: 'Start date is required' });
 
       const { data, error } = await supabaseAdmin
         .from('student_dexterity')
@@ -276,7 +289,7 @@ export function registerNotesDexterityRoutes(router: Router) {
           student_id: id,
           activity,
           description,
-          start_date: startDate,
+          start_date: startDate || null,
           end_date: isOngoing ? null : endDate || null,
           is_ongoing: isOngoing,
         })
@@ -360,6 +373,135 @@ export function registerNotesDexterityRoutes(router: Router) {
     } catch (error: any) {
       console.error('Error deleting dexterity:', error);
       res.status(500).json({ error: error.message || 'Server error deleting dexterity' });
+    }
+  });
+
+  // ─── Licenses & Achievements ───────────────────────────────────────
+  router.get('/:id/credentials', authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { id } = req.params;
+      const access = await assertStudentAccess(req, id);
+      if (!access.ok) return res.status(access.status).json({ error: access.error });
+
+      const kind = typeof req.query.kind === 'string' ? req.query.kind : undefined;
+      let query = supabaseAdmin
+        .from('student_credentials')
+        .select('*')
+        .eq('student_id', id)
+        .order('created_at', { ascending: false });
+
+      if (kind === 'LICENSE' || kind === 'ACHIEVEMENT') {
+        query = query.eq('kind', kind);
+      }
+
+      const { data, error } = await query;
+      if (error) return res.status(500).json({ error: error.message });
+      res.json({ items: (data || []).map(mapCredential) });
+    } catch (error: any) {
+      console.error('Error listing credentials:', error);
+      res.status(500).json({ error: error.message || 'Server error listing credentials' });
+    }
+  });
+
+  router.post('/:id/credentials', authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { id } = req.params;
+      const access = await assertStudentAccess(req, id, { write: true });
+      if (!access.ok) return res.status(access.status).json({ error: access.error });
+
+      const kind = req.body?.kind === 'ACHIEVEMENT' ? 'ACHIEVEMENT' : 'LICENSE';
+      const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+      const issuer = typeof req.body?.issuer === 'string' ? req.body.issuer.trim() : '';
+      const year = typeof req.body?.year === 'string' ? req.body.year.trim() : '';
+      const description =
+        typeof req.body?.description === 'string' ? req.body.description.trim() : '';
+
+      if (!title) return res.status(400).json({ error: 'Title is required' });
+
+      const { data, error } = await supabaseAdmin
+        .from('student_credentials')
+        .insert({
+          student_id: id,
+          kind,
+          title,
+          issuer,
+          year,
+          description,
+        })
+        .select('*')
+        .single();
+
+      if (error) return res.status(500).json({ error: error.message });
+      res.status(201).json({ item: mapCredential(data) });
+    } catch (error: any) {
+      console.error('Error creating credential:', error);
+      res.status(500).json({ error: error.message || 'Server error creating credential' });
+    }
+  });
+
+  router.put('/:id/credentials/:itemId', authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { id, itemId } = req.params;
+      const access = await assertStudentAccess(req, id, { write: true });
+      if (!access.ok) return res.status(access.status).json({ error: access.error });
+
+      const updates: Record<string, unknown> = {
+        updated_at: new Date().toISOString(),
+      };
+
+      if (req.body?.kind === 'LICENSE' || req.body?.kind === 'ACHIEVEMENT') {
+        updates.kind = req.body.kind;
+      }
+      if (typeof req.body?.title === 'string') {
+        const title = req.body.title.trim();
+        if (!title) return res.status(400).json({ error: 'Title is required' });
+        updates.title = title;
+      }
+      if (typeof req.body?.issuer === 'string') updates.issuer = req.body.issuer.trim();
+      if (typeof req.body?.year === 'string') updates.year = req.body.year.trim();
+      if (typeof req.body?.description === 'string') {
+        updates.description = req.body.description.trim();
+      }
+
+      const { data, error } = await supabaseAdmin
+        .from('student_credentials')
+        .update(updates)
+        .eq('id', itemId)
+        .eq('student_id', id)
+        .select('*')
+        .maybeSingle();
+
+      if (error) return res.status(500).json({ error: error.message });
+      if (!data) return res.status(404).json({ error: 'Credential not found' });
+
+      res.json({ item: mapCredential(data) });
+    } catch (error: any) {
+      console.error('Error updating credential:', error);
+      res.status(500).json({ error: error.message || 'Server error updating credential' });
+    }
+  });
+
+  router.delete('/:id/credentials/:itemId', authenticate, async (req: AuthRequest, res: Response) => {
+    try {
+      const { id, itemId } = req.params;
+      const access = await assertStudentAccess(req, id, { write: true });
+      if (!access.ok) return res.status(access.status).json({ error: access.error });
+
+      const { data, error } = await supabaseAdmin
+        .from('student_credentials')
+        .delete()
+        .eq('id', itemId)
+        .eq('student_id', id)
+        .select('id')
+        .maybeSingle();
+
+      if (error) return res.status(500).json({ error: error.message });
+      if (!data) return res.status(404).json({ error: 'Credential not found' });
+
+      res.json({ message: 'Credential deleted' });
+    } catch (error: any) {
+      console.error('Error deleting credential:', error);
+      res.status(500).json({ error: error.message || 'Server error deleting credential' });
     }
   });
 }
