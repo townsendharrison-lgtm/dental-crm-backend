@@ -196,6 +196,49 @@ async function sendPushToUsers(
   }
 }
 
+/** 15-minute heads-up for everyone involved (no actor excluded). */
+export async function notifyMeetingStartingSoon(options: { meeting: MeetingRow }) {
+  const { meeting } = options;
+  try {
+    const recipients = await resolveRecipientIds(meeting);
+    if (recipients.length === 0) return;
+
+    const audience = normalizeAudience(meeting);
+    const label =
+      audience === 'GLOBAL'
+        ? meeting.title || 'Webinar'
+        : meeting.title || 'Meeting';
+    const title =
+      audience === 'GLOBAL' ? 'Webinar starting in 15 minutes' : 'Meeting starting in 15 minutes';
+    const message = `"${label}" starts in 15 minutes. Join when you're ready.`;
+
+    const rows = recipients.map((userId) => ({
+      user_id: userId,
+      title,
+      message,
+      type: 'INFO' as const,
+      category: 'MEETING',
+      related_id: meeting.id,
+      is_read: false,
+      created_by: 'system',
+    }));
+
+    const { error } = await supabaseAdmin.from('notifications').insert(rows);
+    if (error) {
+      console.error('Failed to create meeting reminder notifications:', error.message);
+    }
+
+    await sendPushToUsers(recipients, {
+      title,
+      body: message,
+      meetingId: meeting.id,
+      kind: 'reminder_15',
+    });
+  } catch (err) {
+    console.error('notifyMeetingStartingSoon error:', err);
+  }
+}
+
 export async function notifyMeetingParties(options: {
   meeting: MeetingRow;
   actorId: string;

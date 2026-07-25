@@ -246,10 +246,16 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
 
     // Common fields that students, mentors, and admins can update
     const commonFields = [
-      'zip_code', 'gpa', 'dat_score', 'dat_aa', 'dat_ts', 'is_reapplicant',
+      'zip_code', 'gpa', 'sgpa', 'major', 'dat_score', 'dat_aa', 'dat_ts',
+      'dat_pat', 'dat_bio', 'dat_gc', 'dat_oc', 'dat_rc', 'dat_qr', 'dat_sns', 'dat_mdt',
+      'dat_type', 'is_reapplicant', 'applicant_type',
+      'previous_application_doc_id', 'reapplicant_schools', 'considering_schools',
+      'took_online_classes', 'took_cc_classes',
+      'additional_schooling', 'additional_schooling_other',
       'application_cycle', 'state', 'country', 'ethnicity', 'gender', 'age',
       'undergrad_institution', 'undergrad_degree', 'undergrad_grad_year',
-      'post_bac', 'masters', 'lor_required', 'lor_external_service', 'timezone',
+      'post_bac', 'masters', 'lor_required', 'lor_external_service',
+      'lor_external_collected', 'timezone',
       'school_categories', 'month_colors',
     ];
 
@@ -258,6 +264,11 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
         dbUpdates[field] = updates[field];
       }
     });
+
+    if (dbUpdates.lor_external_collected !== undefined) {
+      const n = Number(dbUpdates.lor_external_collected);
+      dbUpdates.lor_external_collected = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+    }
 
     // Accept camelCase schoolCategories / monthColors from the frontend
     if (updates.schoolCategories !== undefined && updates.school_categories === undefined) {
@@ -271,10 +282,14 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
     // so unverified edits cannot keep affecting strength score.
     const gpaChanging =
       updates.gpa !== undefined && Number(updates.gpa) !== Number(existingProfile.gpa);
-    const datChanging =
-      (updates.dat_score !== undefined && Number(updates.dat_score) !== Number(existingProfile.dat_score)) ||
-      (updates.dat_aa !== undefined && Number(updates.dat_aa) !== Number(existingProfile.dat_aa)) ||
-      (updates.dat_ts !== undefined && Number(updates.dat_ts) !== Number(existingProfile.dat_ts));
+    const datKeys = [
+      'dat_score', 'dat_aa', 'dat_ts', 'dat_pat', 'dat_bio', 'dat_gc',
+      'dat_oc', 'dat_rc', 'dat_qr', 'dat_sns', 'dat_mdt', 'dat_type',
+    ] as const;
+    const datChanging = datKeys.some((key) => {
+      if (updates[key] === undefined) return false;
+      return String(updates[key] ?? '') !== String(existingProfile[key] ?? '');
+    });
 
     if (gpaChanging && updates.gpa_verified !== true) {
       dbUpdates.gpa_verified = false;

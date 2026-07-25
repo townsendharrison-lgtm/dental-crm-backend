@@ -41,6 +41,7 @@ export interface PostBacOrMasters {
   strengthScore: number;
   degreeType: string;
   year: string;
+  gpa?: number | null;
 }
 
 export interface StudentProfile {
@@ -56,11 +57,34 @@ export interface StudentProfile {
   zip_code?: string | null;
   strength_score: number;
   gpa?: number | null;
+  sgpa?: number | null;
+  major?: string | null;
   avg_response_time: number;
   dat_score?: number | null;
   dat_aa?: number | null;
   dat_ts?: number | null;
+  dat_pat?: number | null;
+  dat_bio?: number | null;
+  dat_gc?: number | null;
+  dat_oc?: number | null;
+  dat_rc?: number | null;
+  dat_qr?: number | null;
+  dat_sns?: number | null;
+  dat_mdt?: number | null;
+  dat_type?: 'NOT_TAKEN' | 'AMERICAN' | 'CANADIAN' | null;
   is_reapplicant: boolean;
+  applicant_type?: 'FIRST_TIME' | 'REAPPLICANT' | null;
+  previous_application_doc_id?: string | null;
+  reapplicant_schools?: Array<{
+    schoolId: string;
+    schoolName: string;
+    outcomes: string[];
+  }> | null;
+  considering_schools?: Array<{ id: string; name: string; location?: string }> | null;
+  took_online_classes?: boolean | null;
+  took_cc_classes?: boolean | null;
+  additional_schooling?: string[] | null;
+  additional_schooling_other?: string | null;
   application_cycle?: string | null;
   status: 'Preparing' | 'Applying' | 'Interviewing';
   state?: string | null;
@@ -77,6 +101,7 @@ export interface StudentProfile {
   masters?: PostBacOrMasters | null;
   lor_required: number;
   lor_external_service: boolean;
+  lor_external_collected?: number;
   timezone?: string | null;
   last_profile_reminder_at?: string | null;
   school_categories?: Array<{ id: string; name: string; color: string; icon: string }> | null;

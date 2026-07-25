@@ -36,6 +36,7 @@ import { milestonesRouter } from './routes/milestones.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { startReminderCron } from './services/lorReminderCron.js';
 import { startWorkflowCron } from './services/workflowCron.js';
+import { startMeetingReminderCron } from './services/meetingReminderCron.js';
 import { supabaseAdmin } from './config/supabase.js';
 
 const app = express();
@@ -158,4 +159,6 @@ app.listen(PORT, () => {
   startReminderCron();
   // Start workflow queue processor
   startWorkflowCron();
+  // 15-minute meeting / webinar heads-up
+  startMeetingReminderCron();
 });

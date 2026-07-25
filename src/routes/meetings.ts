@@ -509,7 +509,13 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 
     if ((isOrganizer || isPrivileged) && role !== 'STUDENT') {
       if (updates.title !== undefined) dbUpdates.title = updates.title;
-      if (updates.date !== undefined) dbUpdates.date = updates.date;
+      if (updates.date !== undefined) {
+        dbUpdates.date = updates.date;
+        // Allow a fresh 15-min reminder for the new time
+        if (updates.date !== existing.date) {
+          dbUpdates.reminder_15_sent_at = null;
+        }
+      }
       if (updates.timezone !== undefined) dbUpdates.timezone = updates.timezone;
       if (updates.duration !== undefined) dbUpdates.duration = updates.duration;
       if (updates.summary !== undefined) dbUpdates.summary = updates.summary;
