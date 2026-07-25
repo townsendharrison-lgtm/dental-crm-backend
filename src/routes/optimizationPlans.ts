@@ -8,12 +8,65 @@ const router = Router();
 router.use(authenticate);
 
 // ─── GET /api/optimization-plans ──────────────────────────────────────
-// Fetch a student's active optimization plan (includes score, KPIs, roadmap, and risks)
+// - Staff + ?list=1 → all plans with student summary (admin / mentor-manager)
+// - Otherwise → one student's plan (?studentId= required for staff)
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
     const role = req.user!.role;
-    const { studentId } = req.query;
+    const { studentId, list } = req.query;
+
+    // Admin overview: list all created school-selection / optimization reports
+    if (
+      (list === '1' || list === 'true') &&
+      (role === 'ADMIN' || role === 'MENTOR_MANAGER')
+    ) {
+      const { data: plans, error } = await supabaseAdmin
+        .from('optimization_plans')
+        .select('*')
+        .order('updated_at', { ascending: false });
+
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+
+      const rows = plans || [];
+      const ids = Array.from(new Set(rows.map((p) => p.student_id).filter(Boolean)));
+      let usersById = new Map<string, { id: string; name: string; email: string; avatar?: string | null }>();
+
+      if (ids.length > 0) {
+        const { data: users } = await supabaseAdmin
+          .from('users')
+          .select('id, name, email, avatar')
+          .in('id', ids);
+        usersById = new Map((users || []).map((u) => [u.id, u]));
+      }
+
+      return res.json(
+        rows.map((plan) => {
+          const user = usersById.get(plan.student_id);
+          const email = user?.email || '';
+          return {
+            ...plan,
+            student: user
+              ? {
+                  id: user.id,
+                  name: user.name || 'Unnamed student',
+                  email,
+                  avatar: user.avatar || null,
+                  isExternal: email.toLowerCase().endsWith('@school-selection.local'),
+                }
+              : {
+                  id: plan.student_id,
+                  name: 'Unknown student',
+                  email: '',
+                  avatar: null,
+                  isExternal: false,
+                },
+          };
+        }),
+      );
+    }
 
     let targetStudentId = userId;
 
