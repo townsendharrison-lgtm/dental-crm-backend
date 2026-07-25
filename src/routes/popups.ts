@@ -277,6 +277,8 @@ router.post('/', authorize('ADMIN'), async (req: AuthRequest, res: Response) => 
       title,
       message,
       imageUrl,
+      imageFit,
+      imageHeight,
       ctaText,
       ctaUrl,
       backgroundColor,
@@ -291,12 +293,21 @@ router.post('/', authorize('ADMIN'), async (req: AuthRequest, res: Response) => 
       return res.status(400).json({ error: 'Title, message, startDate, and endDate are required' });
     }
 
+    const fit =
+      imageFit === 'contain' || imageFit === 'original' || imageFit === 'cover'
+        ? imageFit
+        : 'cover';
+    const height =
+      imageHeight === 'sm' || imageHeight === 'md' || imageHeight === 'lg' ? imageHeight : 'md';
+
     const { data: newPopup, error } = await supabaseAdmin
       .from('popup_advertisements')
       .insert({
         title,
         message,
         image_url: imageUrl || null,
+        image_fit: fit,
+        image_height: height,
         cta_text: ctaText || null,
         cta_url: ctaUrl || null,
         background_color: backgroundColor || null,
@@ -342,6 +353,22 @@ router.put('/:id', authorize('ADMIN'), async (req: AuthRequest, res: Response) =
     if (updates.title !== undefined) dbUpdates.title = updates.title;
     if (updates.message !== undefined) dbUpdates.message = updates.message;
     if (updates.imageUrl !== undefined) dbUpdates.image_url = updates.imageUrl || null;
+    if (updates.imageFit !== undefined) {
+      dbUpdates.image_fit =
+        updates.imageFit === 'contain' ||
+        updates.imageFit === 'original' ||
+        updates.imageFit === 'cover'
+          ? updates.imageFit
+          : 'cover';
+    }
+    if (updates.imageHeight !== undefined) {
+      dbUpdates.image_height =
+        updates.imageHeight === 'sm' ||
+        updates.imageHeight === 'md' ||
+        updates.imageHeight === 'lg'
+          ? updates.imageHeight
+          : 'md';
+    }
     if (updates.ctaText !== undefined) dbUpdates.cta_text = updates.ctaText || null;
     if (updates.ctaUrl !== undefined) dbUpdates.cta_url = updates.ctaUrl || null;
     if (updates.backgroundColor !== undefined) dbUpdates.background_color = updates.backgroundColor;

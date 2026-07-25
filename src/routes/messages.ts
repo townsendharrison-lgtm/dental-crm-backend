@@ -122,6 +122,57 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ─── GET /api/conversations/analytics/sent-monthly ────────────────────
+// Messages sent by month for the current user (or ?userId= for admin preview)
+router.get('/analytics/sent-monthly', async (req: AuthRequest, res: Response) => {
+  try {
+    const role = req.user!.role;
+    const requestedUserId = typeof req.query.userId === 'string' ? req.query.userId : '';
+    let targetUserId = req.user!.id;
+
+    if (requestedUserId && requestedUserId !== targetUserId) {
+      if (role !== 'ADMIN' && role !== 'MENTOR_MANAGER') {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+      targetUserId = requestedUserId;
+    }
+
+    const months = Math.min(24, Math.max(1, parseInt(String(req.query.months || '12'), 10) || 12));
+    const since = new Date();
+    since.setMonth(since.getMonth() - (months - 1));
+    since.setDate(1);
+    since.setHours(0, 0, 0, 0);
+
+    const { data: rows, error } = await supabaseAdmin
+      .from('messages')
+      .select('created_at')
+      .eq('sender_id', targetUserId)
+      .gte('created_at', since.toISOString());
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    const counts: Record<string, number> = {};
+    for (const row of rows || []) {
+      const d = new Date(row.created_at);
+      if (Number.isNaN(d.getTime())) continue;
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      counts[key] = (counts[key] || 0) + 1;
+    }
+
+    res.json({
+      userId: targetUserId,
+      months: Object.entries(counts)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([month, count]) => ({ month, count })),
+    });
+  } catch (error: any) {
+    console.error('Sent-monthly analytics error:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
 // ─── GET /api/conversations/:id ───────────────────────────────────────
 // Fetch single conversation details
 router.get('/:id', async (req: AuthRequest, res: Response) => {
