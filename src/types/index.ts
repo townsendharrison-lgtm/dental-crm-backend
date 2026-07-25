@@ -476,6 +476,7 @@ export interface AdminSettings {
   auto_reply_rate_limit_minutes?: number;
   welcome_template_student?: string | null;
   welcome_template_mentor?: string | null;
+  welcome_template_assignment?: string | null;
   accepted_message?: string | null;
   interview_message?: string | null;
   waitlist_message?: string | null;

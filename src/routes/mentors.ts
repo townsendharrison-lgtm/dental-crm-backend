@@ -21,8 +21,8 @@ async function getOrCreateMentorProfile(userId: string) {
       .from('mentor_profiles')
       .insert({
         id: userId,
-        avg_response_time: '4h',
-        avg_response_time_value: 4.0,
+        avg_response_time: '—',
+        avg_response_time_value: 0,
         compliance_score: 100,
         manager_score: 100,
         default_availability: [],
@@ -210,6 +210,26 @@ router.get('/:id', authenticate, async (req: AuthRequest, res: Response) => {
       profile = await getOrCreateMentorProfile(id);
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
+    }
+
+    // Refresh avg response time from student → mentor DM reply latency
+    try {
+      const { recalculateMentorResponseTime } = await import(
+        '../services/mentorResponseTime.js'
+      );
+      const avgHours = await recalculateMentorResponseTime(id);
+      profile = {
+        ...profile,
+        avg_response_time_value: avgHours,
+        avg_response_time:
+          avgHours <= 0
+            ? '—'
+            : avgHours < 1
+              ? `${Math.max(1, Math.round(avgHours * 60))}m`
+              : `${avgHours}h`,
+      };
+    } catch (rtErr) {
+      console.error('Mentor response time recalc error:', rtErr);
     }
 
     // Fetch assigned student IDs
@@ -440,7 +460,7 @@ router.post('/assign', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), async
       assignment = data;
     }
 
-    // Notify the mentor
+    // Notify the mentor (in-app + push with Accept/Decline CTAs)
     await supabaseAdmin.from('notifications').insert({
       user_id: mentorId,
       title: 'New Student Assignment',
@@ -451,6 +471,17 @@ router.post('/assign', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), async
       is_read: false,
       created_by: req.user!.id,
     });
+
+    void import('../services/assignmentNotifications.js')
+      .then(({ sendAssignmentRequestPush }) =>
+        sendAssignmentRequestPush({
+          mentorId,
+          assignmentId: assignment.id,
+          studentName: studentUser.name || 'a student',
+          kind: 'assign',
+        }),
+      )
+      .catch((err) => console.error('Assignment push error:', err));
 
     res.json({
       message: 'Assignment proposed — waiting for mentor acceptance',
@@ -573,6 +604,17 @@ router.post('/transfer', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), asy
       created_by: req.user!.id,
     });
 
+    void import('../services/assignmentNotifications.js')
+      .then(({ sendAssignmentRequestPush }) =>
+        sendAssignmentRequestPush({
+          mentorId: newMentorId,
+          assignmentId: assignment.id,
+          studentName: studentUser?.name || 'a student',
+          kind: 'transfer',
+        }),
+      )
+      .catch((err) => console.error('Assignment transfer push error:', err));
+
     res.json({
       message: 'Transfer initiated — waiting for mentor acceptance',
       studentId,
@@ -662,9 +704,10 @@ router.post('/unassign', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), asy
 router.post('/assignments/:assignmentId/accept', authenticate, authorize('MENTOR', 'ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res: Response) => {
   try {
     const { assignmentId } = req.params;
-    const { availableTimes, welcomeMessage } = req.body as {
+    const { availableTimes, welcomeMessage, timezone } = req.body as {
       availableTimes?: string[];
       welcomeMessage?: string;
+      timezone?: string;
     };
     const requesterId = req.user!.id;
     const requesterRole = req.user!.role;
@@ -733,7 +776,13 @@ router.post('/assignments/:assignmentId/accept', authenticate, authorize('MENTOR
       .select('id, name')
       .eq('id', assignment.mentor_id)
       .maybeSingle();
+    const { data: studentUser } = await supabaseAdmin
+      .from('users')
+      .select('id, name')
+      .eq('id', assignment.student_id)
+      .maybeSingle();
     const mentorName = mentorUser?.name?.trim() || 'your mentor';
+    const studentName = studentUser?.name?.trim() || 'there';
     await supabaseAdmin.from('notifications').insert({
       user_id: assignment.student_id,
       title: 'Mentor Assigned',
@@ -744,6 +793,22 @@ router.post('/assignments/:assignmentId/accept', authenticate, authorize('MENTOR
       is_read: false,
       created_by: requesterId,
     });
+
+    // Send mentor → student welcome DM (inbox), using accept text or Rules Engine preset
+    try {
+      const { sendAssignmentWelcomeDm } = await import('../services/assignmentWelcome.js');
+      await sendAssignmentWelcomeDm({
+        mentorId: assignment.mentor_id,
+        studentId: assignment.student_id,
+        mentorName,
+        studentName,
+        welcomeMessage: welcomeMessage ?? updated.welcome_message,
+        availableTimes: availableTimes || [],
+        timezone,
+      });
+    } catch (welcomeErr) {
+      console.error('Assignment welcome DM error:', welcomeErr);
+    }
 
     res.json({ message: 'Assignment accepted', assignment: updated });
   } catch (error: any) {

@@ -565,6 +565,15 @@ router.post('/:id/messages', (req: AuthRequest, res: Response, next: NextFunctio
         .catch((err) => console.error('Response time recalc error:', err));
     }
 
+    // Refresh mentor avg response time when a mentor replies in a 1:1 DM
+    if (req.user!.role === 'MENTOR' && !conv.is_group) {
+      void import('../services/mentorResponseTime.js')
+        .then(({ recalculateMentorResponseTime }) =>
+          recalculateMentorResponseTime(userId),
+        )
+        .catch((err) => console.error('Mentor response time recalc error:', err));
+    }
+
     res.status(201).json(message);
   } catch (error: any) {
     console.error('Send message error:', error);

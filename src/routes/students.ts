@@ -212,6 +212,96 @@ router.post('/', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), async (req:
   }
 });
 
+/**
+ * POST /api/students/external
+ * Create a shell STUDENT (no login invite) so admins can save school-selection plans
+ * for customers who do not have a dashboard account yet.
+ */
+router.post('/external', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res: Response) => {
+  try {
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    if (!name) {
+      return res.status(400).json({ error: 'Name is required' });
+    }
+
+    const rawEmail = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    const slug = name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'customer';
+    const email =
+      rawEmail ||
+      `external+${slug}-${Date.now().toString(36)}@school-selection.local`;
+
+    if (rawEmail) {
+      const { data: existing } = await supabaseAdmin
+        .from('users')
+        .select('id')
+        .eq('email', rawEmail)
+        .maybeSingle();
+      if (existing) {
+        return res.status(409).json({ error: 'A user with that email already exists' });
+      }
+    }
+
+    const password = `Ext-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}!A1`;
+    const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: {
+        name,
+        role: 'STUDENT',
+        is_external: true,
+      },
+    });
+
+    if (authError || !authData.user) {
+      return res.status(400).json({ error: authError?.message || 'Failed to create external student' });
+    }
+
+    const userId = authData.user.id;
+    const now = new Date().toISOString();
+
+    const { data: user, error: userError } = await supabaseAdmin
+      .from('users')
+      .insert({
+        id: userId,
+        email,
+        name,
+        role: 'STUDENT',
+        created_at: now,
+        updated_at: now,
+      })
+      .select('*')
+      .single();
+
+    if (userError || !user) {
+      await supabaseAdmin.auth.admin.deleteUser(userId);
+      return res.status(400).json({ error: userError?.message || 'Failed to create user profile' });
+    }
+
+    let profile;
+    try {
+      profile = await getOrCreateStudentProfile(userId);
+    } catch (err: any) {
+      await supabaseAdmin.from('users').delete().eq('id', userId);
+      await supabaseAdmin.auth.admin.deleteUser(userId);
+      return res.status(500).json({ error: err.message || 'Failed to create student profile' });
+    }
+
+    res.status(201).json({
+      ...user,
+      profile,
+      isExternal: true,
+    });
+  } catch (error: any) {
+    console.error('Error creating external student:', error);
+    res.status(500).json({ error: error.message || 'Server error creating external student' });
+  }
+});
+
 // PUT /api/students/:id - Update student profile
 router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
   try {

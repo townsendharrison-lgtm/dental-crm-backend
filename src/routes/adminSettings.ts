@@ -53,9 +53,32 @@ router.put('/', authorize('ADMIN'), async (req: AuthRequest, res: Response) => {
     if (updates.welcomeTemplateMentor !== undefined) {
       dbUpdates.welcome_template_mentor = updates.welcomeTemplateMentor;
     }
+    if (updates.welcomeTemplateAssignment !== undefined) {
+      dbUpdates.welcome_template_assignment = updates.welcomeTemplateAssignment;
+    }
     if (updates.acceptedMessage !== undefined) dbUpdates.accepted_message = updates.acceptedMessage;
     if (updates.interviewMessage !== undefined) dbUpdates.interview_message = updates.interviewMessage;
     if (updates.waitlistMessage !== undefined) dbUpdates.waitlist_message = updates.waitlistMessage;
+    if (updates.meetingTypes !== undefined) {
+      if (!Array.isArray(updates.meetingTypes)) {
+        return res.status(400).json({ error: 'meetingTypes must be an array' });
+      }
+      const cleaned = updates.meetingTypes
+        .map((row: any, index: number) => {
+          const label = String(row?.label || '').trim();
+          if (!label) return null;
+          return {
+            id: String(row?.id || `type-${index + 1}`).trim() || `type-${index + 1}`,
+            label,
+            summaryTemplate: String(row?.summaryTemplate ?? row?.summary_template ?? '').trim(),
+          };
+        })
+        .filter(Boolean);
+      if (cleaned.length === 0) {
+        return res.status(400).json({ error: 'At least one meeting type is required' });
+      }
+      dbUpdates.meeting_types = cleaned;
+    }
 
     const { data: updated, error } = await supabaseAdmin
       .from('admin_settings')
