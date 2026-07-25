@@ -727,6 +727,24 @@ router.post('/assignments/:assignmentId/accept', authenticate, authorize('MENTOR
       (declinedRows || []).map((a) => a.id),
     );
 
+    // Notify the student that they now have a mentor
+    const { data: mentorUser } = await supabaseAdmin
+      .from('users')
+      .select('id, name')
+      .eq('id', assignment.mentor_id)
+      .maybeSingle();
+    const mentorName = mentorUser?.name?.trim() || 'your mentor';
+    await supabaseAdmin.from('notifications').insert({
+      user_id: assignment.student_id,
+      title: 'Mentor Assigned',
+      message: `You've been assigned a mentor: ${mentorName}. You can message them and schedule meetings from Momentum.`,
+      type: 'INFO',
+      category: 'ASSIGNMENT',
+      related_id: assignmentId,
+      is_read: false,
+      created_by: requesterId,
+    });
+
     res.json({ message: 'Assignment accepted', assignment: updated });
   } catch (error: any) {
     console.error('Error accepting assignment:', error);

@@ -1,9 +1,26 @@
 /**
  * Strength score (0–100) — automatic competitiveness index.
- * Weighted from academics, DAT, clinical/experience hours, docs, and application readiness.
  *
- * GPA and DAT only contribute when staff have verified them (gpaVerified / datVerified).
+ * Keep in sync with frontend `lib/utils/strengthScore.ts`.
+ *
+ * ## Formula
+ * total = clamp(academics + dat + experience + documents + readiness, 0, 100)
+ *
+ * | Bucket        | Max | Inputs |
+ * |---------------|-----|--------|
+ * | Academics     | 25  | Verified GPA scaled 3.0→0 … 4.0→25 |
+ * | DAT           | 30  | Verified AA (or overall) normalized to legacy 1–30, then 17→0 … 25→30 |
+ * | Experience    | 25  | Shadowing≤8, Volunteering≤6, Dental≤6, Research≤5 (hour-scaled) |
+ * | Documents     | 10  | DAT Report 4, Transcript 3, Resume 2, LOR 1 |
+ * | Readiness     | 10  | Schools/apps + LOR progress (−2 reapplicant penalty if weak DAT) |
+ *
+ * ## DAT dual scale
+ * - Entered ≤ 30 → legacy (1–30)
+ * - Entered > 30 → modern (200–600)
+ * Both are converted to a legacy AA equivalent via ADA concordance before scoring.
  */
+
+import { normalizeDatToLegacy } from './datScale.js';
 
 export type StrengthScoreInputs = {
   gpa?: number | null;
@@ -27,6 +44,7 @@ export type StrengthScoreBreakdown = {
   experience: number;
   documents: number;
   readiness: number;
+  datLegacyAa?: number | null;
 };
 
 function clamp(n: number, min: number, max: number) {
@@ -45,17 +63,17 @@ function hours(map: Partial<Record<string, number>> | undefined, key: string) {
 
 /** Pure formula — keep in sync with frontend `lib/utils/strengthScore.ts`. */
 export function calculateStrengthScore(input: StrengthScoreInputs): StrengthScoreBreakdown {
-  // Academics — max 25 (GPA 3.0→0 … 4.0→25). Only when GPA is staff-verified.
   const gpa = Number(input.gpa);
   const academics =
     input.gpaVerified && Number.isFinite(gpa) ? Math.round(scale(gpa, 3.0, 4.0, 25)) : 0;
 
-  // DAT — max 30 (prefer AA; fallback overall). 17→0 … 25→30. Only when DAT is staff-verified.
-  const dat = Number(input.datAa ?? input.datScore);
+  const rawDat = Number(input.datAa ?? input.datScore);
+  const datLegacy = Number.isFinite(rawDat) ? normalizeDatToLegacy(rawDat) : null;
   const datPts =
-    input.datVerified && Number.isFinite(dat) ? Math.round(scale(dat, 17, 25, 30)) : 0;
+    input.datVerified && datLegacy != null
+      ? Math.round(scale(datLegacy, 17, 25, 30))
+      : 0;
 
-  // Experience hours — max 25
   const h = input.hoursByCategory || {};
   const shadowing = Math.round(scale(hours(h, 'Shadowing'), 0, 100, 8));
   const volunteering = Math.round(scale(hours(h, 'Volunteering'), 0, 100, 6));
@@ -63,7 +81,6 @@ export function calculateStrengthScore(input: StrengthScoreInputs): StrengthScor
   const research = Math.round(scale(hours(h, 'Research'), 0, 100, 5));
   const experience = clamp(shadowing + volunteering + dental + research, 0, 25);
 
-  // Documents — max 10
   const types = new Set((input.documentTypes || []).map((t) => String(t)));
   let documents = 0;
   if (types.has('DAT Report')) documents += 4;
@@ -72,7 +89,6 @@ export function calculateStrengthScore(input: StrengthScoreInputs): StrengthScor
   if (types.has('Letter of Recommendation')) documents += 1;
   documents = clamp(documents, 0, 10);
 
-  // Application readiness — max 10
   let readiness = 0;
   const apps = Number(input.applicationCount || 0);
   const schools = Number(input.schoolCount || 0);
@@ -83,8 +99,10 @@ export function calculateStrengthScore(input: StrengthScoreInputs): StrengthScor
   const lorGot = Number(input.lorReceivedApprox || 0);
   readiness += Math.round(scale(lorGot, 0, lorRequired, 4));
 
-  // Mild reapplicant penalty if no compensating verified DAT yet
-  if (input.isReapplicant && (!input.datVerified || !Number.isFinite(dat) || dat < 20)) {
+  if (
+    input.isReapplicant &&
+    (!input.datVerified || datLegacy == null || datLegacy < 20)
+  ) {
     readiness = Math.max(0, readiness - 2);
   }
   readiness = clamp(readiness, 0, 10);
@@ -98,5 +116,6 @@ export function calculateStrengthScore(input: StrengthScoreInputs): StrengthScor
     experience,
     documents,
     readiness,
+    datLegacyAa: datLegacy,
   };
 }

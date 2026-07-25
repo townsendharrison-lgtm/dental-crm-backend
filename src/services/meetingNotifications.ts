@@ -73,11 +73,26 @@ function formatMeetingWhen(dateIso: string, timezone?: string | null) {
       year: 'numeric',
       hour: 'numeric',
       minute: '2-digit',
-      timeZone: timezone || undefined,
+      timeZone: timezone || 'UTC',
+      timeZoneName: 'short',
     });
   } catch {
     return dateIso;
   }
+}
+
+/** Prefer each recipient's profile timezone so notification copy matches their clock. */
+async function timezonesForUsers(userIds: string[]): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  if (userIds.length === 0) return map;
+  const { data } = await supabaseAdmin
+    .from('student_profiles')
+    .select('id, timezone')
+    .in('id', userIds);
+  for (const row of data || []) {
+    if (row.timezone) map.set(row.id, row.timezone);
+  }
+  return map;
 }
 
 function schedulePathForRole(role: string, meetingId: string) {
@@ -249,39 +264,52 @@ export async function notifyMeetingParties(options: {
     const recipients = await resolveRecipientIds(meeting, actorId);
     if (recipients.length === 0) return;
 
-    const when = formatMeetingWhen(meeting.date, meeting.timezone);
+    const tzByUser = await timezonesForUsers(recipients);
+    const fallbackTz = meeting.timezone || 'UTC';
     const title =
       kind === 'created'
         ? 'New Meeting Scheduled'
         : kind === 'rescheduled'
           ? 'Meeting Rescheduled'
           : 'Meeting Cancelled';
-    const message =
-      kind === 'cancelled'
-        ? `"${meeting.title || 'Meeting'}" (${when}) was cancelled.`
-        : kind === 'rescheduled'
-          ? `"${meeting.title || 'Meeting'}" was moved to ${when}.`
-          : `"${meeting.title || 'Meeting'}" is scheduled for ${when}.`;
 
-    const rows = recipients.map((userId) => ({
-      user_id: userId,
-      title,
-      message,
-      type: kind === 'cancelled' ? ('WARNING' as const) : ('INFO' as const),
-      category: 'MEETING',
-      related_id: meeting.id,
-      is_read: false,
-      created_by: actorId,
-    }));
+    const rows = recipients.map((userId) => {
+      const when = formatMeetingWhen(meeting.date, tzByUser.get(userId) || fallbackTz);
+      const message =
+        kind === 'cancelled'
+          ? `"${meeting.title || 'Meeting'}" (${when}) was cancelled.`
+          : kind === 'rescheduled'
+            ? `"${meeting.title || 'Meeting'}" was moved to ${when}.`
+            : `"${meeting.title || 'Meeting'}" is scheduled for ${when}.`;
+      return {
+        user_id: userId,
+        title,
+        message,
+        type: kind === 'cancelled' ? ('WARNING' as const) : ('INFO' as const),
+        category: 'MEETING',
+        related_id: meeting.id,
+        is_read: false,
+        created_by: actorId,
+      };
+    });
 
     const { error } = await supabaseAdmin.from('notifications').insert(rows);
     if (error) {
       console.error('Failed to create meeting notifications:', error.message);
     }
 
+    // Push body uses meeting timezone (one payload); in-app rows are per-user.
+    const pushWhen = formatMeetingWhen(meeting.date, fallbackTz);
+    const pushBody =
+      kind === 'cancelled'
+        ? `"${meeting.title || 'Meeting'}" (${pushWhen}) was cancelled.`
+        : kind === 'rescheduled'
+          ? `"${meeting.title || 'Meeting'}" was moved to ${pushWhen}.`
+          : `"${meeting.title || 'Meeting'}" is scheduled for ${pushWhen}.`;
+
     await sendPushToUsers(recipients, {
       title,
-      body: message,
+      body: pushBody,
       meetingId: meeting.id,
       kind,
     });
@@ -301,7 +329,11 @@ export async function notifyMentorOfJoin(options: {
   if (!mentorId || mentorId === joinerId) return;
 
   try {
-    const when = formatMeetingWhen(meeting.date, meeting.timezone);
+    const tzByUser = await timezonesForUsers([mentorId]);
+    const when = formatMeetingWhen(
+      meeting.date,
+      tzByUser.get(mentorId) || meeting.timezone || 'UTC',
+    );
     const title = 'Someone joined your meeting';
     const message = `${joinerName} added themselves to "${meeting.title || 'Meeting'}" (${when}).`;
 

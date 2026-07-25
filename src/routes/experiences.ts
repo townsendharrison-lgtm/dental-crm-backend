@@ -254,7 +254,13 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     if (updates.supervisorContact !== undefined) dbUpdates.supervisor_contact = updates.supervisorContact;
     if (updates.description !== undefined) dbUpdates.description = updates.description;
     if (updates.startDate !== undefined) dbUpdates.start_date = updates.startDate;
-    if (updates.endDate !== undefined) dbUpdates.end_date = updates.endDate;
+    if (updates.endDate !== undefined) {
+      dbUpdates.end_date = updates.endDate || null;
+      // End date and ongoing are mutually exclusive
+      if (updates.isOngoing === undefined) {
+        dbUpdates.is_ongoing = !updates.endDate;
+      }
+    }
     if (updates.isOngoing !== undefined) dbUpdates.is_ongoing = updates.isOngoing;
     if (updates.dentistType !== undefined) dbUpdates.dentist_type = updates.dentistType;
 

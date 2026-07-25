@@ -101,6 +101,7 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
         title,
         type,
         url: filePath,
+        original_filename: file.originalname || null,
         status: 'Pending Review'
       })
       .select()
