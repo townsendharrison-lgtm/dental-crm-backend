@@ -48,8 +48,12 @@ router.get('/analytics', authorize('ADMIN', 'MENTOR_MANAGER'), async (_req: Auth
       mentorProfilesMap[p.id] = p;
     });
 
+    const realStudentUsers = (studentUsers || []).filter(
+      (u: any) => !String(u.email || '').toLowerCase().endsWith('@school-selection.local'),
+    );
+
     const analytics = buildPlatformAnalytics({
-      studentUsers: studentUsers || [],
+      studentUsers: realStudentUsers,
       profiles: profilesMap,
       mentorUsers: mentorUsers || [],
       mentorProfiles: mentorProfilesMap,
@@ -271,7 +275,12 @@ router.get('/users', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: error.message });
     }
 
-    res.json(users);
+    // Hide legacy school-selection shell accounts from User Management
+    const filtered = (users || []).filter(
+      (u) => !String(u.email || '').toLowerCase().endsWith('@school-selection.local'),
+    );
+
+    res.json(filtered);
   } catch (error) {
     console.error('Get users error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -402,7 +411,11 @@ router.post('/users/bulk-delete-old-students', async (req: AuthRequest, res: Res
       return res.status(400).json({ error: listError.message });
     }
 
-    const students = (candidates || []).filter((u) => u.id !== req.user!.id);
+    const students = (candidates || []).filter(
+      (u) =>
+        u.id !== req.user!.id &&
+        !String(u.email || '').toLowerCase().endsWith('@school-selection.local'),
+    );
     let deleted = 0;
     const failed: { id: string; error: string }[] = [];
 

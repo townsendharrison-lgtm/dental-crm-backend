@@ -4,17 +4,40 @@ import { authenticate, AuthRequest } from '../middleware/auth.js';
 
 const router = Router();
 
+const EXTERNAL_EMAIL_SUFFIX = '@school-selection.local';
+
+function isLegacyExternalEmail(email?: string | null) {
+  return !!email && email.toLowerCase().endsWith(EXTERNAL_EMAIL_SUFFIX);
+}
+
+function planPayloadFromBody(body: any) {
+  return {
+    snapshot: body.snapshot,
+    overall_score: body.overallScore ?? body.overall_score ?? 0,
+    improvement_leverage_score:
+      body.improvementLeverageScore ?? body.improvement_leverage_score ?? 0,
+    kpis: body.kpis ?? {},
+    roadmap: body.roadmap ?? {},
+    risk_factors: body.riskFactors ?? body.risk_factors ?? [],
+    leverage_actions: body.leverageActions ?? body.leverage_actions ?? [],
+    strengths: body.strengths ?? [],
+    gaps: body.gaps ?? [],
+    school_board: body.schoolBoard ?? body.school_board ?? null,
+    updated_at: new Date().toISOString(),
+  };
+}
+
 // All routes require authentication
 router.use(authenticate);
 
 // ─── GET /api/optimization-plans ──────────────────────────────────────
-// - Staff + ?list=1 → all plans with student summary (admin / mentor-manager)
-// - Otherwise → one student's plan (?studentId= required for staff)
+// - Staff + ?list=1 → all plans with student/external summary
+// - Otherwise → one plan (?studentId= or ?externalId= required for staff)
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
     const role = req.user!.role;
-    const { studentId, list } = req.query;
+    const { studentId, externalId, list } = req.query;
 
     // Admin overview: list all created school-selection / optimization reports
     if (
@@ -31,30 +54,66 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       }
 
       const rows = plans || [];
-      const ids = Array.from(new Set(rows.map((p) => p.student_id).filter(Boolean)));
-      let usersById = new Map<string, { id: string; name: string; email: string; avatar?: string | null }>();
+      const studentIds = Array.from(
+        new Set(rows.map((p) => p.student_id).filter(Boolean)),
+      ) as string[];
+      const externalIds = Array.from(
+        new Set(rows.map((p) => p.external_id).filter(Boolean)),
+      ) as string[];
 
-      if (ids.length > 0) {
+      let usersById = new Map<
+        string,
+        { id: string; name: string; email: string; avatar?: string | null }
+      >();
+      let externalsById = new Map<string, { id: string; name: string }>();
+
+      if (studentIds.length > 0) {
         const { data: users } = await supabaseAdmin
           .from('users')
           .select('id, name, email, avatar')
-          .in('id', ids);
+          .in('id', studentIds);
         usersById = new Map((users || []).map((u) => [u.id, u]));
+      }
+
+      if (externalIds.length > 0) {
+        const { data: externals } = await supabaseAdmin
+          .from('school_selection_externals')
+          .select('id, name')
+          .in('id', externalIds);
+        externalsById = new Map((externals || []).map((e) => [e.id, e]));
       }
 
       return res.json(
         rows.map((plan) => {
+          if (plan.external_id) {
+            const ext = externalsById.get(plan.external_id);
+            return {
+              ...plan,
+              studentId: null,
+              externalId: plan.external_id,
+              student: {
+                id: plan.external_id,
+                name: ext?.name || 'External customer',
+                email: '',
+                avatar: null,
+                isExternal: true,
+              },
+            };
+          }
+
           const user = usersById.get(plan.student_id);
           const email = user?.email || '';
           return {
             ...plan,
+            studentId: plan.student_id,
+            externalId: null,
             student: user
               ? {
                   id: user.id,
                   name: user.name || 'Unnamed student',
                   email,
                   avatar: user.avatar || null,
-                  isExternal: email.toLowerCase().endsWith('@school-selection.local'),
+                  isExternal: isLegacyExternalEmail(email),
                 }
               : {
                   id: plan.student_id,
@@ -68,11 +127,29 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       );
     }
 
+    if (role !== 'STUDENT' && externalId) {
+      const { data: plan, error } = await supabaseAdmin
+        .from('optimization_plans')
+        .select('*')
+        .eq('external_id', externalId as string)
+        .maybeSingle();
+
+      if (error) {
+        return res.status(500).json({ error: error.message });
+      }
+      if (!plan) {
+        return res.status(404).json({ error: 'No optimization plan found for this external customer' });
+      }
+      return res.json(plan);
+    }
+
     let targetStudentId = userId;
 
     if (role !== 'STUDENT') {
       if (!studentId) {
-        return res.status(400).json({ error: 'studentId query parameter is required for staff' });
+        return res.status(400).json({
+          error: 'studentId or externalId query parameter is required for staff',
+        });
       }
       targetStudentId = studentId as string;
     }
@@ -112,34 +189,110 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 });
 
 // ─── POST /api/optimization-plans ─────────────────────────────────────
-// Create or Upsert a student's optimization plan (Admins & assigned Mentors only)
+// Create or Upsert — linked student OR external customer (no CRM account)
 router.post('/', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
     const role = req.user!.role;
     const {
       studentId,
+      externalId,
+      externalName,
       snapshot,
-      overallScore = 0,
-      improvementLeverageScore = 0,
-      kpis = {},
-      roadmap = {},
-      riskFactors = [],
-      leverageActions = [],
-      strengths = [],
-      gaps = []
     } = req.body;
 
-    if (!studentId || !snapshot) {
-      return res.status(400).json({ error: 'studentId and snapshot are required' });
+    if (!snapshot) {
+      return res.status(400).json({ error: 'snapshot is required' });
     }
 
-    // Verify staff rights
     if (role === 'STUDENT') {
       return res.status(403).json({ error: 'Students cannot create optimization plans' });
     }
 
-    // Verify assignment if Mentor is creating the plan
+    const base = planPayloadFromBody(req.body);
+    const wantsExternal =
+      !!externalId ||
+      (typeof externalName === 'string' && externalName.trim().length > 0 && !studentId);
+
+    // ── External customer plan (no auth.users / no student row) ─────────
+    if (wantsExternal) {
+      if (role === 'MENTOR') {
+        return res.status(403).json({
+          error: 'Mentors can only create plans for assigned students',
+        });
+      }
+
+      const name =
+        typeof externalName === 'string' ? externalName.trim() : '';
+      let targetExternalId =
+        typeof externalId === 'string' && externalId.trim() ? externalId.trim() : '';
+
+      if (targetExternalId) {
+        const { data: existingExt, error: extErr } = await supabaseAdmin
+          .from('school_selection_externals')
+          .select('id, name')
+          .eq('id', targetExternalId)
+          .maybeSingle();
+        if (extErr || !existingExt) {
+          return res.status(404).json({ error: 'External customer not found' });
+        }
+        if (name && name !== existingExt.name) {
+          await supabaseAdmin
+            .from('school_selection_externals')
+            .update({ name, updated_at: new Date().toISOString() })
+            .eq('id', targetExternalId);
+        }
+      } else {
+        if (!name) {
+          return res.status(400).json({ error: 'externalName is required for external plans' });
+        }
+        const { data: createdExt, error: createExtErr } = await supabaseAdmin
+          .from('school_selection_externals')
+          .insert({
+            name,
+            created_by: userId,
+          })
+          .select('id')
+          .single();
+        if (createExtErr || !createdExt) {
+          return res.status(400).json({
+            error: createExtErr?.message || 'Failed to create external customer',
+          });
+        }
+        targetExternalId = createdExt.id;
+      }
+
+      const { data: plan, error } = await supabaseAdmin
+        .from('optimization_plans')
+        .upsert(
+          {
+            ...base,
+            student_id: null,
+            external_id: targetExternalId,
+          },
+          { onConflict: 'external_id' },
+        )
+        .select()
+        .single();
+
+      if (error) {
+        return res.status(400).json({ error: error.message });
+      }
+
+      return res.status(201).json({
+        ...plan,
+        externalId: plan.external_id,
+        studentId: null,
+      });
+    }
+
+    // ── Linked CRM student plan ─────────────────────────────────────────
+    if (!studentId) {
+      return res.status(400).json({
+        error: 'studentId or externalName is required',
+      });
+    }
+
     if (role === 'MENTOR') {
       const { data: profile } = await supabaseAdmin
         .from('student_profiles')
@@ -152,24 +305,29 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // Upsert optimization plan (inserts or updates based on student_id unique constraint)
+    // Block saving new plans onto legacy shell "students"
+    const { data: subjectUser } = await supabaseAdmin
+      .from('users')
+      .select('id, email')
+      .eq('id', studentId)
+      .maybeSingle();
+    if (subjectUser && isLegacyExternalEmail(subjectUser.email)) {
+      return res.status(400).json({
+        error:
+          'This account is a legacy external shell. Create a new external plan instead of linking a CRM student.',
+      });
+    }
+
     const { data: plan, error } = await supabaseAdmin
       .from('optimization_plans')
       .upsert(
         {
+          ...base,
           student_id: studentId,
-          snapshot,
-          overall_score: overallScore,
-          improvement_leverage_score: improvementLeverageScore,
-          kpis,
-          roadmap,
-          risk_factors: riskFactors,
-          leverage_actions: leverageActions,
-          strengths,
-          gaps,
-          updated_at: new Date().toISOString()
+          external_id: null,
+          school_board: null,
         },
-        { onConflict: 'student_id' }
+        { onConflict: 'student_id' },
       )
       .select()
       .single();
@@ -178,7 +336,11 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: error.message });
     }
 
-    res.status(201).json(plan);
+    res.status(201).json({
+      ...plan,
+      studentId: plan.student_id,
+      externalId: null,
+    });
   } catch (error: any) {
     console.error('Upsert optimization plan error:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
@@ -186,7 +348,6 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 });
 
 // ─── PUT /api/optimization-plans/:id ──────────────────────────────────
-// Update details of an optimization plan (Admins & assigned Mentors only)
 router.put('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
@@ -204,13 +365,14 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Optimization plan not found' });
     }
 
-    // Verify staff permissions
     if (role === 'STUDENT') {
       return res.status(403).json({ error: 'Students cannot modify optimization plans' });
     }
 
-    // Verify assignment if Mentor is updating the plan
     if (role === 'MENTOR') {
+      if (!existing.student_id) {
+        return res.status(403).json({ error: 'Mentors cannot modify external plans' });
+      }
       const { data: profile } = await supabaseAdmin
         .from('student_profiles')
         .select('mentor_id')
@@ -225,13 +387,27 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     const dbUpdates: any = { updated_at: new Date().toISOString() };
     if (updates.snapshot !== undefined) dbUpdates.snapshot = updates.snapshot;
     if (updates.overallScore !== undefined) dbUpdates.overall_score = updates.overallScore;
-    if (updates.improvementLeverageScore !== undefined) dbUpdates.improvement_leverage_score = updates.improvementLeverageScore;
+    if (updates.improvementLeverageScore !== undefined) {
+      dbUpdates.improvement_leverage_score = updates.improvementLeverageScore;
+    }
     if (updates.kpis !== undefined) dbUpdates.kpis = updates.kpis;
     if (updates.roadmap !== undefined) dbUpdates.roadmap = updates.roadmap;
     if (updates.riskFactors !== undefined) dbUpdates.risk_factors = updates.riskFactors;
     if (updates.leverageActions !== undefined) dbUpdates.leverage_actions = updates.leverageActions;
     if (updates.strengths !== undefined) dbUpdates.strengths = updates.strengths;
     if (updates.gaps !== undefined) dbUpdates.gaps = updates.gaps;
+    if (updates.schoolBoard !== undefined || updates.school_board !== undefined) {
+      dbUpdates.school_board = updates.schoolBoard ?? updates.school_board;
+    }
+    if (typeof updates.externalName === 'string' && existing.external_id) {
+      const name = updates.externalName.trim();
+      if (name) {
+        await supabaseAdmin
+          .from('school_selection_externals')
+          .update({ name, updated_at: new Date().toISOString() })
+          .eq('id', existing.external_id);
+      }
+    }
 
     const { data: updated, error } = await supabaseAdmin
       .from('optimization_plans')
@@ -252,7 +428,6 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 });
 
 // ─── DELETE /api/optimization-plans/:id ───────────────────────────────
-// Delete an optimization plan (Admins & assigned Mentors only)
 router.delete('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
@@ -269,13 +444,14 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Optimization plan not found' });
     }
 
-    // Verify staff permissions
     if (role === 'STUDENT') {
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    // Verify assignment if Mentor is deleting the plan
     if (role === 'MENTOR') {
+      if (!existing.student_id) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
       const { data: profile } = await supabaseAdmin
         .from('student_profiles')
         .select('mentor_id')
@@ -287,6 +463,8 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
       }
     }
 
+    const externalId = existing.external_id as string | null;
+
     const { error } = await supabaseAdmin
       .from('optimization_plans')
       .delete()
@@ -294,6 +472,14 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
 
     if (error) {
       return res.status(500).json({ error: error.message });
+    }
+
+    // Cascade removes plan via FK; also remove external customer row if present
+    if (externalId) {
+      await supabaseAdmin
+        .from('school_selection_externals')
+        .delete()
+        .eq('id', externalId);
     }
 
     res.json({ message: 'Optimization plan deleted successfully' });
