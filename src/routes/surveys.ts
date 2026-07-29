@@ -30,7 +30,14 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       return res.status(500).json({ error: error.message });
     }
 
-    const list = surveys || [];
+    const now = Date.now();
+    // Non-staff should not see expired surveys
+    let list = (surveys || []).filter((s: { end_date?: string | null; is_active?: boolean }) => {
+      if (role === 'ADMIN' || role === 'MENTOR_MANAGER') return true;
+      if (!s.is_active) return false;
+      if (s.end_date && new Date(s.end_date).getTime() < now) return false;
+      return true;
+    });
     const userId = req.user!.id;
 
     // Surveys the current user has already completed
@@ -138,7 +145,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 // Create new survey template (Admin only)
 router.post('/', authorize('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
-    const { title, description, questions = [], targetRole = 'BOTH', isActive = true } = req.body;
+    const { title, description, questions = [], targetRole = 'BOTH', isActive = true, endDate } = req.body;
 
     if (!title) {
       return res.status(400).json({ error: 'Survey title is required' });
@@ -152,6 +159,7 @@ router.post('/', authorize('ADMIN'), async (req: AuthRequest, res: Response) => 
         questions,
         target_role: targetRole,
         is_active: isActive,
+        end_date: endDate || null,
         created_by: req.user!.id
       })
       .select()
@@ -191,6 +199,7 @@ router.put('/:id', authorize('ADMIN'), async (req: AuthRequest, res: Response) =
     if (updates.questions !== undefined) dbUpdates.questions = updates.questions;
     if (updates.targetRole !== undefined) dbUpdates.target_role = updates.targetRole;
     if (updates.isActive !== undefined) dbUpdates.is_active = updates.isActive;
+    if (updates.endDate !== undefined) dbUpdates.end_date = updates.endDate || null;
 
     const { data: updated, error } = await supabaseAdmin
       .from('surveys')
@@ -264,6 +273,10 @@ router.post('/:id/responses', async (req: AuthRequest, res: Response) => {
 
     if (!survey.is_active) {
       return res.status(400).json({ error: 'This survey is no longer accepting responses' });
+    }
+
+    if (survey.end_date && new Date(survey.end_date).getTime() < Date.now()) {
+      return res.status(400).json({ error: 'This survey has ended and is no longer accepting responses' });
     }
 
     // Verify role targeting

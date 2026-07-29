@@ -21,7 +21,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       .select('*')
       .eq('user_id', userId)
       .order('created_at', { ascending: false })
-      .limit(50);
+      .limit(80);
 
     if (unreadOnly) {
       query = query.eq('is_read', false);
@@ -33,7 +33,15 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: error.message });
     }
 
-    res.json({ notifications: data || [] });
+    const now = Date.now();
+    const notifications = (data || [])
+      .filter((n: { end_date?: string | null }) => {
+        if (!n.end_date) return true;
+        return new Date(n.end_date).getTime() >= now;
+      })
+      .slice(0, 50);
+
+    res.json({ notifications });
   } catch (error) {
     console.error('Get notifications error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -45,12 +53,14 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 router.get('/unread-count', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
+    const nowIso = new Date().toISOString();
 
     const { count, error } = await supabaseAdmin
       .from('notifications')
       .select('*', { count: 'exact', head: true })
       .eq('user_id', userId)
-      .eq('is_read', false);
+      .eq('is_read', false)
+      .or(`end_date.is.null,end_date.gte.${nowIso}`);
 
     if (error) {
       return res.status(400).json({ error: error.message });
@@ -277,11 +287,12 @@ router.post('/nudge', authorize('ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequ
 // Admin/Manager: send a system alert to all users matching targetRole
 router.post('/broadcast', authorize('ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res: Response) => {
   try {
-    const { title, message, type = 'INFO', targetRole = 'BOTH' } = req.body as {
+    const { title, message, type = 'INFO', targetRole = 'BOTH', endDate } = req.body as {
       title?: string;
       message?: string;
       type?: 'INFO' | 'WARNING' | 'URGENT';
       targetRole?: 'STUDENT' | 'MENTOR' | 'BOTH';
+      endDate?: string | null;
     };
 
     if (!title?.trim() || !message?.trim()) {
@@ -291,6 +302,7 @@ router.post('/broadcast', authorize('ADMIN', 'MENTOR_MANAGER'), async (req: Auth
     const allowedTypes = ['INFO', 'WARNING', 'URGENT'];
     const notifType = allowedTypes.includes(type) ? type : 'INFO';
     const roleTarget = ['STUDENT', 'MENTOR', 'BOTH'].includes(targetRole) ? targetRole : 'BOTH';
+    const resolvedEndDate = endDate ? new Date(endDate).toISOString() : null;
 
     let usersQuery = supabaseAdmin.from('users').select('id, role');
     if (roleTarget === 'STUDENT') {
@@ -321,6 +333,7 @@ router.post('/broadcast', authorize('ADMIN', 'MENTOR_MANAGER'), async (req: Auth
       related_id: relatedId,
       is_read: false,
       created_by: req.user!.id,
+      end_date: resolvedEndDate,
     }));
 
     const { error: insertError } = await supabaseAdmin.from('notifications').insert(rows);
@@ -368,6 +381,8 @@ router.post('/broadcast', authorize('ADMIN', 'MENTOR_MANAGER'), async (req: Auth
         target_role: roleTarget,
         category: 'BROADCAST',
         related_id: relatedId,
+        end_date: resolvedEndDate,
+        endDate: resolvedEndDate,
         created_by: req.user!.id,
         createdBy: req.user!.id,
         created_at: new Date().toISOString(),
@@ -387,7 +402,7 @@ router.get('/broadcasts', authorize('ADMIN', 'MENTOR_MANAGER'), async (req: Auth
   try {
     const { data, error } = await supabaseAdmin
       .from('notifications')
-      .select('id, title, message, type, category, related_id, created_at, created_by')
+      .select('id, title, message, type, category, related_id, created_at, created_by, end_date')
       .eq('category', 'BROADCAST')
       .order('created_at', { ascending: false })
       .limit(500);
@@ -414,6 +429,8 @@ router.get('/broadcasts', authorize('ADMIN', 'MENTOR_MANAGER'), async (req: Auth
         type: row.type,
         category: row.category,
         related_id: row.related_id,
+        end_date: row.end_date,
+        endDate: row.end_date,
         targetRole,
         target_role: targetRole,
         created_at: row.created_at,
@@ -427,6 +444,92 @@ router.get('/broadcasts', authorize('ADMIN', 'MENTOR_MANAGER'), async (req: Auth
     res.json({ broadcasts });
   } catch (error) {
     console.error('List broadcasts error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ─── PUT /api/notifications/broadcasts/:relatedId ─────────────────────
+// Admin/Manager: update all recipient rows for a broadcast batch
+router.put('/broadcasts/:relatedId', authorize('ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res: Response) => {
+  try {
+    const relatedId = decodeURIComponent(req.params.relatedId);
+    if (!relatedId.startsWith('broadcast:')) {
+      return res.status(400).json({ error: 'Invalid broadcast id' });
+    }
+
+    const { title, message, type, endDate } = req.body as {
+      title?: string;
+      message?: string;
+      type?: 'INFO' | 'WARNING' | 'URGENT';
+      endDate?: string | null;
+    };
+
+    const dbUpdates: Record<string, unknown> = {};
+    if (title !== undefined) {
+      if (!title.trim()) return res.status(400).json({ error: 'Title cannot be empty' });
+      dbUpdates.title = title.trim();
+    }
+    if (message !== undefined) {
+      if (!message.trim()) return res.status(400).json({ error: 'Message cannot be empty' });
+      dbUpdates.message = message.trim();
+    }
+    if (type !== undefined) {
+      const allowedTypes = ['INFO', 'WARNING', 'URGENT'];
+      if (!allowedTypes.includes(type)) {
+        return res.status(400).json({ error: 'Invalid alert type' });
+      }
+      dbUpdates.type = type;
+    }
+    if (endDate !== undefined) {
+      dbUpdates.end_date = endDate ? new Date(endDate).toISOString() : null;
+    }
+
+    if (Object.keys(dbUpdates).length === 0) {
+      return res.status(400).json({ error: 'No updates provided' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('notifications')
+      .update(dbUpdates)
+      .eq('related_id', relatedId)
+      .eq('category', 'BROADCAST')
+      .select('id, title, message, type, related_id, end_date, created_at, created_by')
+      .limit(1);
+
+    if (error) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    const row = data?.[0];
+    if (!row) {
+      return res.status(404).json({ error: 'Broadcast not found' });
+    }
+
+    const parts = String(row.related_id || '').split(':');
+    const targetRole = (parts[0] === 'broadcast' && parts[1] ? parts[1] : 'BOTH') as
+      | 'STUDENT'
+      | 'MENTOR'
+      | 'BOTH';
+
+    res.json({
+      broadcast: {
+        id: relatedId,
+        title: row.title,
+        message: row.message,
+        type: row.type,
+        related_id: row.related_id,
+        end_date: row.end_date,
+        endDate: row.end_date,
+        targetRole,
+        target_role: targetRole,
+        created_at: row.created_at,
+        createdAt: row.created_at,
+        created_by: row.created_by,
+        createdBy: row.created_by,
+      },
+    });
+  } catch (error) {
+    console.error('Update broadcast error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

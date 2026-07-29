@@ -4,12 +4,30 @@ import { authenticate, AuthRequest } from '../middleware/auth.js';
 
 const router = Router();
 
+const COMPLETED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Remove completed tasks that have been checked off for at least a week. */
+async function purgeStaleCompletedActionItems() {
+  const cutoff = new Date(Date.now() - COMPLETED_RETENTION_MS).toISOString();
+  const { error } = await supabaseAdmin
+    .from('action_items')
+    .delete()
+    .eq('status', 'COMPLETED')
+    .lte('completed_at', cutoff);
+
+  if (error) {
+    console.warn('Failed to purge stale completed action items:', error.message);
+  }
+}
+
 // All routes require authentication
 router.use(authenticate);
 
 // GET /api/action-items - List action items
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
+    await purgeStaleCompletedActionItems();
+
     const userId = req.user!.id;
     const role = req.user!.role;
     const { studentId } = req.query; // optional filter
@@ -17,7 +35,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     let query = supabaseAdmin
       .from('action_items')
       .select('*')
-      .order('due_date', { ascending: true });
+      .order('created_at', { ascending: false });
 
     if (role === 'STUDENT') {
       query = query.eq('student_id', userId);
@@ -216,12 +234,20 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     const dbUpdates: any = { updated_at: new Date().toISOString() };
 
     // Update permission filtering
-    if (updates.status !== undefined) dbUpdates.status = updates.status;
+    if (updates.status !== undefined) {
+      dbUpdates.status = updates.status;
+      if (updates.status === 'COMPLETED') {
+        dbUpdates.completed_at = new Date().toISOString();
+      } else if (updates.status === 'PENDING' || updates.status === 'OVERDUE') {
+        dbUpdates.completed_at = null;
+      }
+    }
 
     // Only allow details editing to Owner, Assigned Mentor, or Admins
     if (isOwner || isAssignedMentor || isPrivileged) {
       if (updates.task !== undefined) dbUpdates.task = updates.task;
       if (updates.due_date !== undefined) dbUpdates.due_date = updates.due_date;
+      if (updates.dueDate !== undefined) dbUpdates.due_date = updates.dueDate;
       if (updates.priority !== undefined) dbUpdates.priority = updates.priority;
       if (updates.description !== undefined) dbUpdates.description = updates.description;
       if (updates.category !== undefined) dbUpdates.category = updates.category;

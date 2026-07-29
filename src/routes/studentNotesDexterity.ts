@@ -30,10 +30,9 @@ async function assertStudentAccess(
   const isStaff = role === 'ADMIN' || role === 'MENTOR_MANAGER' || isAssignedMentor;
 
   if (opts.notesWrite) {
-    if (!isStaff) {
-      return { ok: false, status: 403, error: 'Only staff can write mentor notes' };
-    }
-    return { ok: true };
+    // Additional information: student can edit their own; staff can too
+    if (isStaff || isSelf) return { ok: true };
+    return { ok: false, status: 403, error: 'Forbidden' };
   }
 
   if (opts.write) {
