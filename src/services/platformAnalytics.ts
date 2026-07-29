@@ -15,6 +15,7 @@ type AppRow = {
 type ExpRow = {
   student_id: string;
   category: string;
+  prior_hours?: number | null;
   sessions?: { duration?: number | null }[] | null;
 };
 
@@ -37,8 +38,11 @@ function sumHours(exps: ExpRow[], category: string): number {
   return exps
     .filter((e) => e.category === category)
     .reduce((acc, e) => {
+      const prior = Number(e.prior_hours) || 0;
       const sessions = e.sessions || [];
-      return acc + sessions.reduce((s, sess) => s + (Number(sess.duration) || 0), 0);
+      return (
+        acc + prior + sessions.reduce((s, sess) => s + (Number(sess.duration) || 0), 0)
+      );
     }, 0);
 }
 

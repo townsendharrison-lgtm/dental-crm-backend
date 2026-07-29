@@ -1,11 +1,59 @@
 import { Router, Response } from 'express';
 import { supabaseAdmin } from '../config/supabase.js';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth.js';
+import { normalizeDatToLegacy, normalizeDatToModern } from '../services/datScale.js';
+import { recalculateStudentStrengthScore } from '../services/recalculateStrengthScore.js';
 
 const router = Router();
 
 // All routes require authentication
 router.use(authenticate);
+
+type BenchmarkType =
+  | 'PROGRESS'
+  | 'STRENGTH_SCORE'
+  | 'DAT'
+  | 'TASKS_COMPLETED'
+  | 'MEETINGS_ATTENDED'
+  | 'GPA'
+  | 'LOR_COLLECTED'
+  | 'VOLUNTEER_HOURS'
+  | 'SHADOWING_HOURS';
+
+function hoursFromExperiences(
+  experiences: Array<{
+    category?: string | null;
+    prior_hours?: number | null;
+    sessions?: Array<{ duration?: number | null }> | null;
+  }>,
+  category: string,
+): number {
+  return experiences
+    .filter((e) => e.category === category)
+    .reduce((sum, e) => {
+      const prior = Number(e.prior_hours) || 0;
+      const sessionHrs = (e.sessions || []).reduce(
+        (s, sess) => s + (Number(sess.duration) || 0),
+        0,
+      );
+      return sum + prior + sessionHrs;
+    }, 0);
+}
+
+function datMeetsThreshold(rawDat: number, threshold: number): boolean {
+  if (!Number.isFinite(rawDat) || rawDat <= 0) return false;
+  if (!Number.isFinite(threshold) || threshold <= 0) return false;
+
+  // Thresholds > 30 are treated as modern (200–600); otherwise legacy (1–30).
+  if (threshold > 30) {
+    const modern =
+      rawDat > 30 ? rawDat : normalizeDatToModern(rawDat);
+    return (modern || 0) >= threshold;
+  }
+
+  const legacy = normalizeDatToLegacy(rawDat) || 0;
+  return legacy >= threshold;
+}
 
 // ─── GET /api/badges ──────────────────────────────────────────────────
 // Fetch all badge templates in directory
@@ -83,8 +131,12 @@ router.put('/:id', authorize('ADMIN'), async (req: AuthRequest, res: Response) =
     if (updates.description !== undefined) dbUpdates.description = updates.description;
     if (updates.icon !== undefined) dbUpdates.icon = updates.icon;
     if (updates.color !== undefined) dbUpdates.color = updates.color;
-    if (updates.benchmarkType !== undefined) dbUpdates.benchmark_type = updates.benchmarkType;
-    if (updates.benchmarkValue !== undefined) dbUpdates.benchmark_value = updates.benchmarkValue;
+    if (updates.benchmarkType !== undefined || updates.benchmark_type !== undefined) {
+      dbUpdates.benchmark_type = updates.benchmarkType ?? updates.benchmark_type;
+    }
+    if (updates.benchmarkValue !== undefined || updates.benchmark_value !== undefined) {
+      dbUpdates.benchmark_value = updates.benchmarkValue ?? updates.benchmark_value;
+    }
 
     const { data: updated, error } = await supabaseAdmin
       .from('badges')
@@ -180,7 +232,7 @@ router.get('/student/:studentId', async (req: AuthRequest, res: Response) => {
 });
 
 // ─── POST /api/badges/evaluate/:studentId ─────────────────────────────
-// Award qualified badges based on milestones reached (define award logic)
+// Award qualified badges based on milestones reached
 router.post('/evaluate/:studentId', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
@@ -206,10 +258,15 @@ router.post('/evaluate/:studentId', async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ error: 'Access denied' });
     }
 
+    // Refresh strength score so STRENGTH_SCORE badges use current metrics
+    await recalculateStudentStrengthScore(studentId);
+
     // 1. Fetch student metrics profile
     const { data: profile, error: pErr } = await supabaseAdmin
       .from('student_profiles')
-      .select('strength_score, dat_score, dat_aa, progress')
+      .select(
+        'strength_score, dat_score, dat_aa, progress, gpa, lor_external_service, lor_external_collected',
+      )
       .eq('id', studentId)
       .maybeSingle();
 
@@ -217,61 +274,70 @@ router.post('/evaluate/:studentId', async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Student profile not found' });
     }
 
-    // 2. Fetch completed tasks count
-    const { count: tasksCount, error: tErr } = await supabaseAdmin
-      .from('action_items')
-      .select('*', { count: 'exact', head: true })
-      .eq('student_id', studentId)
-      .eq('status', 'COMPLETED');
+    // 2. Parallel metric fetches for remaining benchmark types
+    const [
+      { count: tasksCount, error: tErr },
+      { count: meetingsCount, error: mErr },
+      { data: experiences, error: expErr },
+      { count: vaultLorCount, error: lorErr },
+      { data: allBadges, error: bErr },
+      { data: earned, error: eErr },
+    ] = await Promise.all([
+      supabaseAdmin
+        .from('action_items')
+        .select('*', { count: 'exact', head: true })
+        .eq('student_id', studentId)
+        .eq('status', 'COMPLETED'),
+      supabaseAdmin
+        .from('meetings')
+        .select('*', { count: 'exact', head: true })
+        .eq('student_id', studentId)
+        .eq('completed', true),
+      supabaseAdmin
+        .from('experiences')
+        .select('category, prior_hours, sessions:experience_sessions(duration)')
+        .eq('student_id', studentId),
+      supabaseAdmin
+        .from('lor_requests')
+        .select('*', { count: 'exact', head: true })
+        .eq('student_id', studentId)
+        .eq('status', 'REVIEWED'),
+      supabaseAdmin.from('badges').select('*'),
+      supabaseAdmin.from('student_badges').select('badge_id').eq('student_id', studentId),
+    ]);
 
     if (tErr) return res.status(500).json({ error: tErr.message });
-
-    // 3. Fetch completed meetings count
-    const { count: meetingsCount, error: mErr } = await supabaseAdmin
-      .from('meetings')
-      .select('*', { count: 'exact', head: true })
-      .eq('student_id', studentId)
-      .eq('completed', true);
-
     if (mErr) return res.status(500).json({ error: mErr.message });
-
-    // 4. Fetch all badge definitions
-    const { data: allBadges, error: bErr } = await supabaseAdmin
-      .from('badges')
-      .select('*');
-
+    if (expErr) return res.status(500).json({ error: expErr.message });
+    if (lorErr) return res.status(500).json({ error: lorErr.message });
     if (bErr || !allBadges) return res.status(500).json({ error: bErr?.message || 'Failed to fetch badges' });
-
-    // 5. Fetch already earned badge IDs
-    const { data: earned, error: eErr } = await supabaseAdmin
-      .from('student_badges')
-      .select('badge_id')
-      .eq('student_id', studentId);
-
     if (eErr) return res.status(500).json({ error: eErr.message });
-    const earnedBadgeIds = new Set((earned || []).map(b => b.badge_id));
 
+    const volunteerHours = hoursFromExperiences(experiences || [], 'Volunteering');
+    const shadowingHours = hoursFromExperiences(experiences || [], 'Shadowing');
+    const lorCollected = profile.lor_external_service
+      ? Number(profile.lor_external_collected) || 0
+      : vaultLorCount || 0;
+    const rawDat = Number(profile.dat_aa ?? profile.dat_score ?? 0) || 0;
+    const earnedBadgeIds = new Set((earned || []).map((b) => b.badge_id));
     const newlyAwarded: any[] = [];
 
-    // Evaluate award thresholds
     for (const badge of allBadges) {
-      if (earnedBadgeIds.has(badge.id)) {
-        continue; // Already earned
-      }
+      if (earnedBadgeIds.has(badge.id)) continue;
 
       let qualifies = false;
       const threshold = Number(badge.benchmark_value);
+      const type = badge.benchmark_type as BenchmarkType;
 
-      switch (badge.benchmark_type) {
+      switch (type) {
         case 'STRENGTH_SCORE':
-          qualifies = (profile.strength_score || 0) >= threshold;
+          qualifies = (Number(profile.strength_score) || 0) >= threshold;
           break;
         case 'DAT':
-          const datValue = profile.dat_score || profile.dat_aa || 0;
-          qualifies = datValue >= threshold;
+          qualifies = datMeetsThreshold(rawDat, threshold);
           break;
         case 'PROGRESS':
-          qualifies = (profile.progress || 0) >= threshold;
+          qualifies = (Number(profile.progress) || 0) >= threshold;
           break;
         case 'TASKS_COMPLETED':
           qualifies = (tasksCount || 0) >= threshold;
@@ -279,17 +345,28 @@ router.post('/evaluate/:studentId', async (req: AuthRequest, res: Response) => {
         case 'MEETINGS_ATTENDED':
           qualifies = (meetingsCount || 0) >= threshold;
           break;
+        case 'GPA':
+          qualifies = (Number(profile.gpa) || 0) >= threshold;
+          break;
+        case 'LOR_COLLECTED':
+          qualifies = lorCollected >= threshold;
+          break;
+        case 'VOLUNTEER_HOURS':
+          qualifies = volunteerHours >= threshold;
+          break;
+        case 'SHADOWING_HOURS':
+          qualifies = shadowingHours >= threshold;
+          break;
         default:
           break;
       }
 
       if (qualifies) {
-        // Insert earned badge achievement record
         const { data: newAward, error: insertErr } = await supabaseAdmin
           .from('student_badges')
           .insert({
             student_id: studentId,
-            badge_id: badge.id
+            badge_id: badge.id,
           })
           .select('*, badge:badges(*)')
           .single();
@@ -300,7 +377,6 @@ router.post('/evaluate/:studentId', async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // Fetch full earned badge list to return total
     const { data: totalEarned } = await supabaseAdmin
       .from('student_badges')
       .select('*, badge:badges(*)')
@@ -308,7 +384,7 @@ router.post('/evaluate/:studentId', async (req: AuthRequest, res: Response) => {
 
     res.json({
       newlyAwarded,
-      totalEarned: totalEarned || []
+      totalEarned: totalEarned || [],
     });
   } catch (error: any) {
     console.error('Evaluate badges error:', error);

@@ -357,7 +357,16 @@ export interface Badge {
   description: string;
   icon: string;
   color: string;
-  benchmark_type: 'PROGRESS' | 'STRENGTH_SCORE' | 'DAT' | 'TASKS_COMPLETED' | 'MEETINGS_ATTENDED';
+  benchmark_type:
+    | 'PROGRESS'
+    | 'STRENGTH_SCORE'
+    | 'DAT'
+    | 'TASKS_COMPLETED'
+    | 'MEETINGS_ATTENDED'
+    | 'GPA'
+    | 'LOR_COLLECTED'
+    | 'VOLUNTEER_HOURS'
+    | 'SHADOWING_HOURS';
   benchmark_value: number;
   created_at: string;
   updated_at: string;

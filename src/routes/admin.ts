@@ -28,7 +28,7 @@ router.get('/analytics', authorize('ADMIN', 'MENTOR_MANAGER'), async (_req: Auth
       supabaseAdmin.from('users').select('id, name, avatar').eq('role', 'MENTOR'),
       supabaseAdmin.from('mentor_profiles').select('*'),
       supabaseAdmin.from('applications').select('*, school:schools(id, name)'),
-      supabaseAdmin.from('experiences').select('student_id, category, sessions:experience_sessions(duration)'),
+      supabaseAdmin.from('experiences').select('student_id, category, prior_hours, sessions:experience_sessions(duration)'),
     ]);
 
     if (studentsError) return res.status(500).json({ error: studentsError.message });

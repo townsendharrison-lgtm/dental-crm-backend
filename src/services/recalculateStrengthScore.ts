@@ -3,13 +3,18 @@ import { calculateStrengthScore } from './strengthScore.js';
 import { recordStrengthHistoryIfChanged } from './strengthHistory.js';
 
 function experienceHoursByCategory(
-  experiences: Array<{ category?: string; sessions?: Array<{ duration?: number }> }>,
+  experiences: Array<{
+    category?: string;
+    prior_hours?: number | null;
+    sessions?: Array<{ duration?: number }>;
+  }>,
 ) {
   const map: Record<string, number> = {};
   for (const exp of experiences) {
     const cat = exp.category || 'Other';
+    const prior = Number(exp.prior_hours || 0) || 0;
     const hours = (exp.sessions || []).reduce((sum, s) => sum + Number(s.duration || 0), 0);
-    map[cat] = (map[cat] || 0) + hours;
+    map[cat] = (map[cat] || 0) + prior + hours;
   }
   return map;
 }
@@ -25,7 +30,7 @@ export async function recalculateStudentStrengthScore(studentId: string): Promis
         supabaseAdmin.from('student_profiles').select('*').eq('id', studentId).maybeSingle(),
         supabaseAdmin
           .from('experiences')
-          .select('id, category, sessions:experience_sessions(duration)')
+          .select('id, category, prior_hours, sessions:experience_sessions(duration)')
           .eq('student_id', studentId),
         supabaseAdmin.from('student_documents').select('type').eq('student_id', studentId),
         supabaseAdmin.from('applications').select('id').eq('student_id', studentId),

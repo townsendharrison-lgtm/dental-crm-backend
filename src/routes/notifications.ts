@@ -145,7 +145,10 @@ router.post('/register-token', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'Token is required' });
     }
 
-    // Upsert: insert or update if token already exists for this user
+    // Upsert for this user, and claim the device token so other accounts
+    // (e.g. a student previously logged in on this browser) stop receiving pushes here.
+    await supabaseAdmin.from('fcm_tokens').delete().eq('token', token).neq('user_id', userId);
+
     const { error } = await supabaseAdmin
       .from('fcm_tokens')
       .upsert(

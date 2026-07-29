@@ -152,7 +152,9 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       startDate,
       endDate,
       isOngoing = false,
-      dentistType
+      dentistType,
+      priorHours,
+      priorWeeks,
     } = req.body;
 
     if (!category || !title || !startDate) {
@@ -178,6 +180,15 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       }
     }
 
+    const parsedPriorHours =
+      priorHours !== undefined && priorHours !== null && priorHours !== ''
+        ? Number(priorHours)
+        : 0;
+    const parsedPriorWeeks =
+      priorWeeks !== undefined && priorWeeks !== null && priorWeeks !== ''
+        ? Math.floor(Number(priorWeeks))
+        : 0;
+
     const { data: newExperience, error } = await supabaseAdmin
       .from('experiences')
       .insert({
@@ -191,7 +202,9 @@ router.post('/', async (req: AuthRequest, res: Response) => {
         start_date: startDate,
         end_date: endDate || null,
         is_ongoing: endDate ? false : !!isOngoing,
-        dentist_type: dentistType || null
+        dentist_type: dentistType || null,
+        prior_hours: Number.isFinite(parsedPriorHours) && parsedPriorHours > 0 ? parsedPriorHours : 0,
+        prior_weeks: Number.isFinite(parsedPriorWeeks) && parsedPriorWeeks > 0 ? parsedPriorWeeks : 0,
       })
       .select()
       .single();
@@ -263,6 +276,14 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     }
     if (updates.isOngoing !== undefined) dbUpdates.is_ongoing = updates.isOngoing;
     if (updates.dentistType !== undefined) dbUpdates.dentist_type = updates.dentistType;
+    if (updates.priorHours !== undefined) {
+      const n = Number(updates.priorHours);
+      dbUpdates.prior_hours = Number.isFinite(n) && n > 0 ? n : 0;
+    }
+    if (updates.priorWeeks !== undefined) {
+      const n = Math.floor(Number(updates.priorWeeks));
+      dbUpdates.prior_weeks = Number.isFinite(n) && n > 0 ? n : 0;
+    }
 
     const { data: updated, error } = await supabaseAdmin
       .from('experiences')

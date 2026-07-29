@@ -173,7 +173,20 @@ async function notifyStudentLOREvent(studentId: string, payload: {
 async function notifyStudentLORReviewed(studentId: string, writerName: string, status: string) {
   if (!studentId) return; // Guest students don't get push notifications
   try {
-    const statusText = status === 'REVIEWED' ? 'approved' : 'declined';
+    // Only CRM students should receive approval/decline alerts — never staff.
+    const { data: recipient } = await supabaseAdmin
+      .from('users')
+      .select('id, role')
+      .eq('id', studentId)
+      .maybeSingle();
+
+    if (!recipient || recipient.role !== 'STUDENT') {
+      console.log(
+        `Skipping LOR reviewed notification for non-student user ${studentId} (role=${recipient?.role ?? 'missing'})`,
+      );
+      return;
+    }
+
     const notifRow = {
       user_id: studentId,
       title: status === 'REVIEWED' ? '✅ Letter Approved' : '⚠️ Letter Needs Revision',
