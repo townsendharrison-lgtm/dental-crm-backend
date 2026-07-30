@@ -216,15 +216,37 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 router.post('/', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-
-    if (req.user!.role === 'STUDENT') {
-      return res.status(403).json({ error: 'Students cannot start new conversations' });
-    }
-
+    const role = req.user!.role;
     const { participantIds, isGroup = false, name } = req.body;
 
     if (!participantIds || !Array.isArray(participantIds) || participantIds.length === 0) {
       return res.status(400).json({ error: 'Participant IDs array is required' });
+    }
+
+    // Students may only find/create a 1:1 DM with their assigned mentor
+    if (role === 'STUDENT') {
+      if (isGroup || participantIds.length !== 1) {
+        return res.status(403).json({
+          error: 'Students can only start a direct conversation with their assigned mentor',
+        });
+      }
+
+      const mentorId = participantIds[0];
+      const { data: profile, error: profileError } = await supabaseAdmin
+        .from('student_profiles')
+        .select('mentor_id')
+        .eq('id', userId)
+        .maybeSingle();
+
+      if (profileError) {
+        return res.status(500).json({ error: profileError.message });
+      }
+      if (!profile?.mentor_id) {
+        return res.status(403).json({ error: 'No mentor assigned yet' });
+      }
+      if (profile.mentor_id !== mentorId) {
+        return res.status(403).json({ error: 'You can only message your assigned mentor' });
+      }
     }
 
     // Ensure current user is in the participants list
