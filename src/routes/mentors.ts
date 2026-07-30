@@ -461,27 +461,14 @@ router.post('/assign', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), async
     }
 
     // Notify the mentor (in-app + push with Accept/Decline CTAs)
-    await supabaseAdmin.from('notifications').insert({
-      user_id: mentorId,
-      title: 'New Student Assignment',
-      message: `You have been assigned a new student: ${studentUser.name || 'Student'}. Please accept the assignment.`,
-      type: 'URGENT',
-      category: 'ASSIGNMENT',
-      related_id: assignment.id,
-      is_read: false,
-      created_by: req.user!.id,
+    const { notifyMentorOfAssignment } = await import('../services/assignmentNotifications.js');
+    await notifyMentorOfAssignment({
+      mentorId,
+      assignmentId: assignment.id,
+      studentName: studentUser.name || 'Student',
+      createdBy: req.user!.id,
+      kind: 'assign',
     });
-
-    void import('../services/assignmentNotifications.js')
-      .then(({ sendAssignmentRequestPush }) =>
-        sendAssignmentRequestPush({
-          mentorId,
-          assignmentId: assignment.id,
-          studentName: studentUser.name || 'a student',
-          kind: 'assign',
-        }),
-      )
-      .catch((err) => console.error('Assignment push error:', err));
 
     res.json({
       message: 'Assignment proposed — waiting for mentor acceptance',
@@ -593,27 +580,14 @@ router.post('/transfer', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), asy
       return res.status(500).json({ error: logErr.message });
     }
 
-    await supabaseAdmin.from('notifications').insert({
-      user_id: newMentorId,
-      title: 'New Student Transfer Request',
-      message: `${studentUser?.name || 'A student'} has been transferred to you. Please accept the assignment.`,
-      type: 'URGENT',
-      category: 'ASSIGNMENT',
-      related_id: assignment.id,
-      is_read: false,
-      created_by: req.user!.id,
+    const { notifyMentorOfAssignment } = await import('../services/assignmentNotifications.js');
+    await notifyMentorOfAssignment({
+      mentorId: newMentorId,
+      assignmentId: assignment.id,
+      studentName: studentUser?.name || 'A student',
+      createdBy: req.user!.id,
+      kind: 'transfer',
     });
-
-    void import('../services/assignmentNotifications.js')
-      .then(({ sendAssignmentRequestPush }) =>
-        sendAssignmentRequestPush({
-          mentorId: newMentorId,
-          assignmentId: assignment.id,
-          studentName: studentUser?.name || 'a student',
-          kind: 'transfer',
-        }),
-      )
-      .catch((err) => console.error('Assignment transfer push error:', err));
 
     res.json({
       message: 'Transfer initiated — waiting for mentor acceptance',
