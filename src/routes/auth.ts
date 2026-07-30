@@ -192,7 +192,13 @@ router.post('/signin', async (req: Request, res: Response) => {
     }
 
     const user = data.user;
-    const role = user.user_metadata?.role || 'STUDENT';
+    const { data: profile } = await supabaseAdmin
+      .from('users')
+      .select('*')
+      .eq('id', user.id)
+      .single();
+
+    const role = profile?.role || user.user_metadata?.role || 'STUDENT';
 
     res.json({
       token: data.session.access_token,
@@ -200,8 +206,10 @@ router.post('/signin', async (req: Request, res: Response) => {
       user: {
         id: user.id,
         email: user.email,
-        name: user.user_metadata?.name || '',
-        role
+        name: profile?.name || user.user_metadata?.name || '',
+        role,
+        avatar: profile?.avatar,
+        timezone: profile?.timezone || undefined,
       }
     });
   } catch (error) {
@@ -294,7 +302,17 @@ router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    res.json(user);
+    res.json({
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      avatar: user.avatar,
+      timezone: user.timezone || undefined,
+      createdAt: user.created_at,
+      weeklyLeadGoal: user.weekly_lead_goal,
+      monthlyLeadGoal: user.monthly_lead_goal,
+    });
   } catch (error) {
     console.error('Get user error:', error);
     res.status(500).json({ error: 'Internal server error' });

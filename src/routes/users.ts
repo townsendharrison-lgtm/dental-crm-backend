@@ -43,7 +43,7 @@ router.get('/profile', authenticate, async (req: AuthRequest, res: Response) => 
 // Update user profile
 router.put('/profile', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const { name, avatar, weeklyLeadGoal, monthlyLeadGoal } = req.body;
+    const { name, avatar, weeklyLeadGoal, monthlyLeadGoal, timezone } = req.body;
     const updates: Record<string, unknown> = {
       updated_at: new Date().toISOString(),
     };
@@ -52,6 +52,9 @@ router.put('/profile', authenticate, async (req: AuthRequest, res: Response) => 
     if (avatar !== undefined) updates.avatar = avatar;
     if (weeklyLeadGoal !== undefined) updates.weekly_lead_goal = weeklyLeadGoal;
     if (monthlyLeadGoal !== undefined) updates.monthly_lead_goal = monthlyLeadGoal;
+    if (typeof timezone === 'string' && timezone.trim()) {
+      updates.timezone = timezone.trim();
+    }
 
     if (Object.keys(updates).length === 1) {
       return res.status(400).json({ error: 'No valid profile fields to update' });

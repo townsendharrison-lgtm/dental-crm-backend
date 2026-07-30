@@ -10,6 +10,8 @@ export interface User {
   name: string;
   role: UserRole;
   avatar?: string;
+  /** IANA timezone from the user's device (e.g. America/New_York). */
+  timezone?: string;
   createdAt: string;
   weeklyLeadGoal?: number;
   monthlyLeadGoal?: number;
