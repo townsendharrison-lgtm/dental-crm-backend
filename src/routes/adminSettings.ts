@@ -80,6 +80,22 @@ router.put('/', authorize('ADMIN'), async (req: AuthRequest, res: Response) => {
       dbUpdates.meeting_types = cleaned;
     }
 
+    if (updates.timelineCardColors !== undefined) {
+      const raw = updates.timelineCardColors;
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        return res.status(400).json({ error: 'timelineCardColors must be an object' });
+      }
+      const keys = ['Meeting', 'Milestone', 'Task', 'Other'] as const;
+      const cleaned: Record<string, string> = {};
+      for (const key of keys) {
+        const val = String((raw as Record<string, unknown>)[key] || '').trim();
+        cleaned[key] = /^#[0-9a-fA-F]{3,8}$/.test(val) ? val : (
+          { Meeting: '#6366f1', Milestone: '#10b981', Task: '#f59e0b', Other: '#94a3b8' }[key]
+        );
+      }
+      dbUpdates.timeline_card_colors = cleaned;
+    }
+
     const { data: updated, error } = await supabaseAdmin
       .from('admin_settings')
       .update(dbUpdates)

@@ -274,6 +274,7 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
       'post_bac', 'masters', 'lor_required', 'lor_external_service',
       'lor_external_collected', 'timezone',
       'school_categories', 'month_colors',
+      'timeline_start', 'timeline_end', 'timeline_month_goals',
     ];
 
     commonFields.forEach(field => {
@@ -293,6 +294,22 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
     }
     if (updates.monthColors !== undefined && updates.month_colors === undefined) {
       dbUpdates.month_colors = updates.monthColors;
+    }
+    if (updates.timelineStart !== undefined && updates.timeline_start === undefined) {
+      dbUpdates.timeline_start = updates.timelineStart;
+    }
+    if (updates.timelineEnd !== undefined && updates.timeline_end === undefined) {
+      dbUpdates.timeline_end = updates.timelineEnd;
+    }
+    if (updates.timelineMonthGoals !== undefined && updates.timeline_month_goals === undefined) {
+      dbUpdates.timeline_month_goals = updates.timelineMonthGoals;
+    }
+
+    // Students cannot change roadmap range / primary goals
+    if (requesterRole === 'STUDENT') {
+      delete dbUpdates.timeline_start;
+      delete dbUpdates.timeline_end;
+      delete dbUpdates.timeline_month_goals;
     }
 
     // If GPA/DAT values change without an explicit re-verify, clear verification

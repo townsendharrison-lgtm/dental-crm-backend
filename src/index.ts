@@ -33,6 +33,7 @@ import { adminSettingsRouter } from './routes/adminSettings.js';
 import { researchCasesRouter } from './routes/researchCases.js';
 import { coursesRouter } from './routes/courses.js';
 import { milestonesRouter } from './routes/milestones.js';
+import { timelineBookshelfRouter } from './routes/timelineBookshelf.js';
 import { nationalBenchmarksRouter } from './routes/nationalBenchmarks.js';
 import { errorHandler } from './middleware/errorHandler.js';
 
@@ -145,6 +146,7 @@ app.use('/api/admin-settings', adminSettingsRouter);
 app.use('/api/research-cases', researchCasesRouter);
 app.use('/api/courses', coursesRouter);
 app.use('/api/milestones', milestonesRouter);
+app.use('/api/timeline-bookshelf', timelineBookshelfRouter);
 app.use('/api/national-benchmarks', nationalBenchmarksRouter);
 
 // Health check
