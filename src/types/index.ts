@@ -107,6 +107,8 @@ export interface StudentProfile {
   timezone?: string | null;
   last_profile_reminder_at?: string | null;
   school_categories?: Array<{ id: string; name: string; color: string; icon: string }> | null;
+  /** Manual Application Readiness checklist flags */
+  application_readiness?: Record<string, boolean> | null;
   created_at: string;
   updated_at: string;
 }
@@ -241,7 +243,14 @@ export interface StudentDocument {
   updated_at: string;
 }
 
-export type ExperienceCategory = 'Volunteering' | 'Research' | 'Shadowing' | 'Dental Experience' | 'Employment' | 'Academic';
+export type ExperienceCategory =
+  | 'Volunteering'
+  | 'Research'
+  | 'Shadowing'
+  | 'Dental Experience'
+  | 'Employment'
+  | 'Academic'
+  | 'Extracurricular';
 
 export interface Experience {
   id: string;

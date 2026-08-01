@@ -11,7 +11,7 @@ function isLegacyExternalEmail(email?: string | null) {
 }
 
 function planPayloadFromBody(body: any) {
-  return {
+  const payload: Record<string, unknown> = {
     snapshot: body.snapshot,
     overall_score: body.overallScore ?? body.overall_score ?? 0,
     improvement_leverage_score:
@@ -24,6 +24,32 @@ function planPayloadFromBody(body: any) {
     gaps: body.gaps ?? [],
     school_board: body.schoolBoard ?? body.school_board ?? null,
     updated_at: new Date().toISOString(),
+  };
+
+  if (body.categories !== undefined) {
+    payload.categories =
+      body.categories && typeof body.categories === 'object' ? body.categories : {};
+  }
+  if (body.manualDexterity !== undefined || body.manual_dexterity !== undefined) {
+    payload.manual_dexterity = body.manualDexterity ?? body.manual_dexterity ?? null;
+  }
+
+  return payload;
+}
+
+function mapPlanRow(plan: any) {
+  if (!plan) return plan;
+  return {
+    ...plan,
+    studentId: plan.student_id,
+    externalId: plan.external_id,
+    schoolBoard: plan.school_board ?? null,
+    overallScore: plan.overall_score,
+    improvementLeverageScore: plan.improvement_leverage_score,
+    riskFactors: plan.risk_factors ?? [],
+    leverageActions: plan.leverage_actions ?? [],
+    categories: plan.categories ?? {},
+    manualDexterity: plan.manual_dexterity ?? null,
   };
 }
 
@@ -140,7 +166,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       if (!plan) {
         return res.status(404).json({ error: 'No optimization plan found for this external customer' });
       }
-      return res.json(plan);
+      return res.json(mapPlanRow(plan));
     }
 
     let targetStudentId = userId;
@@ -181,7 +207,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'No optimization plan found for this student' });
     }
 
-    res.json(plan);
+    res.json(mapPlanRow(plan));
   } catch (error: any) {
     console.error('Fetch optimization plan error:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
@@ -279,11 +305,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
         return res.status(400).json({ error: error.message });
       }
 
-      return res.status(201).json({
-        ...plan,
-        externalId: plan.external_id,
-        studentId: null,
-      });
+      return res.status(201).json(mapPlanRow(plan));
     }
 
     // ── Linked CRM student plan ─────────────────────────────────────────
@@ -336,11 +358,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: error.message });
     }
 
-    res.status(201).json({
-      ...plan,
-      studentId: plan.student_id,
-      externalId: null,
-    });
+    res.status(201).json(mapPlanRow(plan));
   } catch (error: any) {
     console.error('Upsert optimization plan error:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
@@ -399,6 +417,13 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     if (updates.schoolBoard !== undefined || updates.school_board !== undefined) {
       dbUpdates.school_board = updates.schoolBoard ?? updates.school_board;
     }
+    if (updates.categories !== undefined) {
+      dbUpdates.categories =
+        updates.categories && typeof updates.categories === 'object' ? updates.categories : {};
+    }
+    if (updates.manualDexterity !== undefined || updates.manual_dexterity !== undefined) {
+      dbUpdates.manual_dexterity = updates.manualDexterity ?? updates.manual_dexterity ?? null;
+    }
     if (typeof updates.externalName === 'string' && existing.external_id) {
       const name = updates.externalName.trim();
       if (name) {
@@ -420,7 +445,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: error.message });
     }
 
-    res.json(updated);
+    res.json(mapPlanRow(updated));
   } catch (error: any) {
     console.error('Update optimization plan error:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });

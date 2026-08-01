@@ -275,6 +275,7 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
       'lor_external_collected', 'timezone',
       'school_categories', 'month_colors',
       'timeline_start', 'timeline_end', 'timeline_month_goals',
+      'application_readiness',
     ];
 
     commonFields.forEach(field => {
@@ -304,12 +305,32 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
     if (updates.timelineMonthGoals !== undefined && updates.timeline_month_goals === undefined) {
       dbUpdates.timeline_month_goals = updates.timelineMonthGoals;
     }
+    if (updates.applicationReadiness !== undefined && updates.application_readiness === undefined) {
+      dbUpdates.application_readiness = updates.applicationReadiness;
+    }
+    if (dbUpdates.application_readiness !== undefined) {
+      const raw = dbUpdates.application_readiness;
+      dbUpdates.application_readiness =
+        raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    }
 
     // Students cannot change roadmap range / primary goals
     if (requesterRole === 'STUDENT') {
       delete dbUpdates.timeline_start;
       delete dbUpdates.timeline_end;
       delete dbUpdates.timeline_month_goals;
+    }
+
+    // Students may sync progress % when updating Application Readiness flags
+    if (
+      requesterRole === 'STUDENT' &&
+      dbUpdates.application_readiness !== undefined &&
+      updates.progress !== undefined
+    ) {
+      const n = Number(updates.progress);
+      if (Number.isFinite(n)) {
+        dbUpdates.progress = Math.max(0, Math.min(100, Math.round(n)));
+      }
     }
 
     // If GPA/DAT values change without an explicit re-verify, clear verification

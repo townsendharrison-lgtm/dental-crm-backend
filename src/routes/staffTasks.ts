@@ -19,7 +19,20 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       .select('*')
       .order('due_date', { ascending: true });
 
-    if (role !== 'ADMIN') {
+    if (role === 'MENTOR_MANAGER') {
+      // Managers see their own tasks plus tasks assigned to any mentor
+      const { data: mentorUsers, error: mentorsErr } = await supabaseAdmin
+        .from('users')
+        .select('id')
+        .eq('role', 'MENTOR');
+      if (mentorsErr) {
+        return res.status(500).json({ error: mentorsErr.message });
+      }
+      const assigneeIds = Array.from(
+        new Set([userId, ...(mentorUsers || []).map((u) => u.id)]),
+      );
+      query = query.in('assigned_to', assigneeIds);
+    } else if (role !== 'ADMIN') {
       query = query.or(`assigned_to.eq.${userId},assigned_by.eq.${userId}`);
     }
 
