@@ -321,15 +321,22 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
       delete dbUpdates.timeline_month_goals;
     }
 
-    // Students may sync progress % when updating Application Readiness flags
+    // Students may sync progress % + traffic-light readiness with Application Readiness flags
     if (
       requesterRole === 'STUDENT' &&
-      dbUpdates.application_readiness !== undefined &&
-      updates.progress !== undefined
+      dbUpdates.application_readiness !== undefined
     ) {
-      const n = Number(updates.progress);
-      if (Number.isFinite(n)) {
-        dbUpdates.progress = Math.max(0, Math.min(100, Math.round(n)));
+      if (updates.progress !== undefined) {
+        const n = Number(updates.progress);
+        if (Number.isFinite(n)) {
+          dbUpdates.progress = Math.max(0, Math.min(100, Math.round(n)));
+        }
+      }
+      if (updates.readiness !== undefined) {
+        const band = String(updates.readiness).toUpperCase();
+        if (band === 'GREEN' || band === 'YELLOW' || band === 'RED') {
+          dbUpdates.readiness = band;
+        }
       }
     }
 
@@ -353,9 +360,7 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
       dbUpdates.dat_verified = false;
     }
 
-    // Student specific restrictions:
-    // Students cannot change mentor assignment, progress, readiness, or DAT verification status
-    // strength_score is ALWAYS formula-driven — never accept client writes
+    // Staff-only profile fields (progress/readiness still auto-aligned below)
     if (requesterRole === 'ADMIN' || requesterRole === 'MENTOR_MANAGER' || requesterRole === 'MENTOR') {
       if (updates.readiness !== undefined) dbUpdates.readiness = updates.readiness;
       if (updates.progress !== undefined) dbUpdates.progress = updates.progress;
@@ -369,6 +374,17 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
       if (updates.open_action_items_count !== undefined) dbUpdates.open_action_items_count = updates.open_action_items_count;
       if (updates.avg_response_time !== undefined) dbUpdates.avg_response_time = updates.avg_response_time;
       if (updates.last_profile_reminder_at !== undefined) dbUpdates.last_profile_reminder_at = updates.last_profile_reminder_at;
+    }
+
+    // Keep readiness traffic light aligned with Application Readiness progress %
+    // RED <40 · YELLOW 40–69 · GREEN ≥70
+    if (dbUpdates.progress !== undefined) {
+      const p = Number(dbUpdates.progress);
+      if (Number.isFinite(p)) {
+        const clamped = Math.max(0, Math.min(100, Math.round(p)));
+        dbUpdates.progress = clamped;
+        dbUpdates.readiness = clamped >= 70 ? 'GREEN' : clamped >= 40 ? 'YELLOW' : 'RED';
+      }
     }
 
     // Only Admin & Mentor Manager can update mentor_id (reassignments are managed through specific assign/transfer endpoints)
