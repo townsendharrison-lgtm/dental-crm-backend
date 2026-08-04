@@ -276,6 +276,7 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
       'school_categories', 'month_colors',
       'timeline_start', 'timeline_end', 'timeline_month_goals',
       'application_readiness',
+      'application_journey',
     ];
 
     commonFields.forEach(field => {
@@ -308,17 +309,26 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
     if (updates.applicationReadiness !== undefined && updates.application_readiness === undefined) {
       dbUpdates.application_readiness = updates.applicationReadiness;
     }
+    if (updates.applicationJourney !== undefined && updates.application_journey === undefined) {
+      dbUpdates.application_journey = updates.applicationJourney;
+    }
     if (dbUpdates.application_readiness !== undefined) {
       const raw = dbUpdates.application_readiness;
       dbUpdates.application_readiness =
         raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
     }
+    if (dbUpdates.application_journey !== undefined) {
+      const raw = dbUpdates.application_journey;
+      dbUpdates.application_journey =
+        raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    }
 
-    // Students cannot change roadmap range / primary goals
+    // Students cannot change roadmap range / primary goals / journey phases
     if (requesterRole === 'STUDENT') {
       delete dbUpdates.timeline_start;
       delete dbUpdates.timeline_end;
       delete dbUpdates.timeline_month_goals;
+      delete dbUpdates.application_journey;
     }
 
     // Students may sync progress % + traffic-light readiness with Application Readiness flags

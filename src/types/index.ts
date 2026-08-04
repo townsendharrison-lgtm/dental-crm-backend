@@ -109,6 +109,8 @@ export interface StudentProfile {
   school_categories?: Array<{ id: string; name: string; color: string; icon: string }> | null;
   /** Manual Application Readiness checklist flags */
   application_readiness?: Record<string, boolean> | null;
+  /** Application Journey phase completion (mentor/staff) */
+  application_journey?: Record<string, boolean> | null;
   created_at: string;
   updated_at: string;
 }
