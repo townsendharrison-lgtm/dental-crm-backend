@@ -9,11 +9,71 @@ const router = Router();
 // All notification routes require authentication
 router.use(authenticate);
 
+const MENTOR_NOTIF_TTL_MS = 48 * 60 * 60 * 1000;
+
+function isNewLeadRow(n: { category?: string | null; title?: string | null; message?: string | null }) {
+  const category = String(n.category || '').toUpperCase();
+  if (category === 'NEW_LEAD') return true;
+  const blob = `${n.title || ''} ${n.message || ''}`.toLowerCase();
+  return /\bnew lead\b/.test(blob) || blob.includes('added as a new lead');
+}
+
+function filterNotificationsForRole<T extends {
+  id?: string;
+  category?: string | null;
+  title?: string | null;
+  message?: string | null;
+  created_at?: string | null;
+  end_date?: string | null;
+}>(rows: T[], role: string | undefined, userId: string) {
+  const now = Date.now();
+  const roleUpper = String(role || '').toUpperCase();
+  const mentorCutoff = now - MENTOR_NOTIF_TTL_MS;
+  const expiredMentorIds: string[] = [];
+
+  const filtered = rows.filter((n) => {
+    if (n.end_date && new Date(n.end_date).getTime() < now) return false;
+
+    // Setter lead alerts are admin-only
+    if (roleUpper !== 'ADMIN' && isNewLeadRow(n)) return false;
+
+    // Mentor dashboard / inbox: auto-expire after 48 hours
+    if (roleUpper === 'MENTOR') {
+      if (isNewLeadRow(n) && n.id) {
+        expiredMentorIds.push(n.id);
+        return false;
+      }
+      const created = n.created_at ? new Date(n.created_at).getTime() : 0;
+      if (created && created < mentorCutoff) {
+        if (n.id) expiredMentorIds.push(n.id);
+        return false;
+      }
+    }
+
+    return true;
+  });
+
+  if (roleUpper === 'MENTOR' && expiredMentorIds.length > 0) {
+    const uniqueIds = [...new Set(expiredMentorIds)];
+    void supabaseAdmin
+      .from('notifications')
+      .delete()
+      .eq('user_id', userId)
+      .in('id', uniqueIds)
+      .then(({ error }) => {
+        if (error) console.error('Failed pruning mentor notifications:', error.message);
+      });
+  }
+
+  return filtered;
+}
+
 // ─── GET /api/notifications ───────────────────────────────────────────
 // Fetch current user's notifications (optionally only unread)
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
+    const role = req.user!.role;
     const unreadOnly = req.query.unread === 'true';
 
     let query = supabaseAdmin
@@ -33,13 +93,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: error.message });
     }
 
-    const now = Date.now();
-    const notifications = (data || [])
-      .filter((n: { end_date?: string | null }) => {
-        if (!n.end_date) return true;
-        return new Date(n.end_date).getTime() >= now;
-      })
-      .slice(0, 50);
+    const notifications = filterNotificationsForRole(data || [], role, userId).slice(0, 50);
 
     res.json({ notifications });
   } catch (error) {
@@ -53,11 +107,12 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 router.get('/unread-count', async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
+    const role = req.user!.role;
     const nowIso = new Date().toISOString();
 
-    const { count, error } = await supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from('notifications')
-      .select('*', { count: 'exact', head: true })
+      .select('id, category, title, message, created_at, end_date, is_read')
       .eq('user_id', userId)
       .eq('is_read', false)
       .or(`end_date.is.null,end_date.gte.${nowIso}`);
@@ -66,7 +121,8 @@ router.get('/unread-count', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: error.message });
     }
 
-    res.json({ count: count || 0 });
+    const visible = filterNotificationsForRole(data || [], role, userId);
+    res.json({ count: visible.length });
   } catch (error) {
     console.error('Get unread count error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -571,10 +627,10 @@ router.post('/new-lead', authorize('SETTER', 'ADMIN'), async (req: AuthRequest, 
       return res.status(400).json({ error: 'Lead data is required' });
     }
 
-    // 1. Find all Admin users
-    const { data: admins, error: adminError } = await supabaseAdmin
+    // 1. Find Admin users only (never mentors / managers / setters)
+    const { data: adminRows, error: adminError } = await supabaseAdmin
       .from('users')
-      .select('id')
+      .select('id, role')
       .eq('role', 'ADMIN');
 
     if (adminError) {
@@ -582,7 +638,11 @@ router.post('/new-lead', authorize('SETTER', 'ADMIN'), async (req: AuthRequest, 
       return res.status(500).json({ error: 'Failed to fetch admin users' });
     }
 
-    if (!admins || admins.length === 0) {
+    const admins = (adminRows || []).filter(
+      (u: { id: string; role?: string }) => String(u.role || '').toUpperCase() === 'ADMIN',
+    );
+
+    if (admins.length === 0) {
       console.warn('No admin users found for notification');
       return res.json({ success: true, notified: 0 });
     }
@@ -596,33 +656,63 @@ router.post('/new-lead', authorize('SETTER', 'ADMIN'), async (req: AuthRequest, 
       lead.notes ? `Notes: ${lead.notes}` : '',
     ].filter(Boolean).join('\n');
 
-    // 3. Insert in-app notification for each Admin
-    const notificationRows = admins.map((admin: { id: string }) => ({
-      user_id: admin.id,
-      title: notifTitle,
-      message: notifMessage,
-      type: 'URGENT' as const,
-      category: 'NEW_LEAD',
-      related_id: lead.id || null,
-      is_read: false,
-      created_by: req.user!.id,
-    }));
+    // 3. Insert in-app notification for each Admin only (skip if already created via /api/leads)
+    let alreadyNotified = false;
+    if (lead.id) {
+      const { data: existing } = await supabaseAdmin
+        .from('notifications')
+        .select('id')
+        .eq('category', 'NEW_LEAD')
+        .eq('related_id', lead.id)
+        .limit(1);
+      alreadyNotified = !!(existing && existing.length > 0);
+    }
 
-    const { error: insertError } = await supabaseAdmin
-      .from('notifications')
-      .insert(notificationRows);
+    if (!alreadyNotified) {
+      const notificationRows = admins.map((admin: { id: string }) => ({
+        user_id: admin.id,
+        title: notifTitle,
+        message: notifMessage,
+        type: 'URGENT' as const,
+        category: 'NEW_LEAD',
+        related_id: lead.id || null,
+        is_read: false,
+        created_by: req.user!.id,
+      }));
 
-    if (insertError) {
-      console.error('Failed to insert notifications:', insertError.message);
-    } else {
-      console.log(`📬 In-app notifications created for ${admins.length} admin(s)`);
+      const { error: insertError } = await supabaseAdmin
+        .from('notifications')
+        .insert(notificationRows);
+
+      if (insertError) {
+        console.error('Failed to insert notifications:', insertError.message);
+      } else {
+        console.log(`📬 In-app notifications created for ${admins.length} admin(s)`);
+      }
+    }
+
+    // Safety: remove any NEW_LEAD rows that were incorrectly assigned to non-admins
+    const adminIds = admins.map((a: { id: string }) => a.id);
+    try {
+      const { data: leadNotifs } = await supabaseAdmin
+        .from('notifications')
+        .select('id, user_id')
+        .eq('category', 'NEW_LEAD');
+      const strayIds = (leadNotifs || [])
+        .filter((n: { id: string; user_id: string }) => !adminIds.includes(n.user_id))
+        .map((n: { id: string }) => n.id);
+      if (strayIds.length > 0) {
+        await supabaseAdmin.from('notifications').delete().in('id', strayIds);
+        console.log(`🧹 Removed ${strayIds.length} NEW_LEAD notification(s) from non-admin users`);
+      }
+    } catch (cleanupErr) {
+      console.error('NEW_LEAD cleanup error:', cleanupErr);
     }
 
     // 4. Send FCM push notifications to all Admin devices
     let pushCount = 0;
     if (messaging) {
       // Fetch all FCM tokens for admin users
-      const adminIds = admins.map((a: { id: string }) => a.id);
       const { data: tokens, error: tokenError } = await supabaseAdmin
         .from('fcm_tokens')
         .select('token')

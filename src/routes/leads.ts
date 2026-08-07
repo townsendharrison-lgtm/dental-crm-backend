@@ -75,6 +75,54 @@ router.post('/', authenticate, async (req: AuthRequest, res: Response) => {
       return res.status(500).json({ error: error.message });
     }
 
+    // Notify admins only (best-effort; never block lead creation)
+    try {
+      const setterId = finalSetterId || req.user?.id;
+      let setterName = 'A setter';
+      if (setterId) {
+        const { data: setter } = await supabaseAdmin
+          .from('users')
+          .select('name')
+          .eq('id', setterId)
+          .maybeSingle();
+        if (setter?.name) setterName = setter.name;
+      }
+
+      const { data: admins } = await supabaseAdmin
+        .from('users')
+        .select('id, role')
+        .eq('role', 'ADMIN');
+
+      const adminIds = (admins || [])
+        .filter((u: { role?: string }) => String(u.role || '').toUpperCase() === 'ADMIN')
+        .map((u: { id: string }) => u.id);
+
+      if (adminIds.length > 0) {
+        const notifTitle = '🆕 New Lead Added';
+        const notifMessage = [
+          `${lead.name} has been added as a new lead by ${setterName}.`,
+          `📞 ${lead.phone || 'N/A'} · 📧 ${lead.email || 'N/A'}`,
+          `Source: ${lead.source || 'Unknown'}`,
+          lead.notes ? `Notes: ${lead.notes}` : '',
+        ].filter(Boolean).join('\n');
+
+        await supabaseAdmin.from('notifications').insert(
+          adminIds.map((adminId: string) => ({
+            user_id: adminId,
+            title: notifTitle,
+            message: notifMessage,
+            type: 'URGENT',
+            category: 'NEW_LEAD',
+            related_id: lead.id,
+            is_read: false,
+            created_by: req.user!.id,
+          })),
+        );
+      }
+    } catch (notifErr) {
+      console.error('Failed to create admin new-lead notifications:', notifErr);
+    }
+
     res.status(201).json({ lead });
   } catch (error) {
     console.error('Server error creating lead:', error);

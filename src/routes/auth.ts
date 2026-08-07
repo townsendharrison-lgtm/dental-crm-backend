@@ -240,10 +240,12 @@ router.post('/reset-password', async (req: Request, res: Response) => {
   try {
     const { email }: ResetPasswordRequest = req.body;
 
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
 
+    // Must be a real Next.js path (not a legacy hash route). Supabase appends
+    // `#access_token=...&type=recovery` to this URL.
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${frontendUrl}/#/reset-password`
+      redirectTo: `${frontendUrl}/reset-password`,
     });
 
     if (error) {
