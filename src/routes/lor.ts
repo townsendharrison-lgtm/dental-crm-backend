@@ -296,7 +296,10 @@ router.post('/requests/guest', async (req: Request, res: Response) => {
     // Send tracking email to STUDENT
     try {
       const trackingToken = encryptTrackingToken(studentEmail.toLowerCase().trim());
-      const trackingUrl = `${process.env.LOR_GUEST_TRACK_URL || process.env.FRONTEND_URL || 'http://localhost:3000'}/#/guest-letter-track?token=${encodeURIComponent(trackingToken)}`;
+      const trackingBase = (process.env.LOR_GUEST_TRACK_URL || process.env.FRONTEND_URL || 'http://localhost:3000')
+        .replace(/\/$/, '')
+        .replace(/\/#.*$/, '');
+      const trackingUrl = `${trackingBase}/guest-letter-track?token=${encodeURIComponent(trackingToken)}`;
       
       const { Resend } = await import('resend');
       const resend = new Resend(process.env.RESEND_API_KEY);
@@ -331,7 +334,9 @@ router.post('/requests/guest', async (req: Request, res: Response) => {
 
     res.status(201).json({
       request: lorReq,
-      trackingUrl: `${process.env.LOR_GUEST_TRACK_URL || process.env.FRONTEND_URL || 'http://localhost:3000'}/#/guest-letter-track?token=${encodeURIComponent(encryptTrackingToken(studentEmail.toLowerCase().trim()))}`,
+      trackingUrl: `${(process.env.LOR_GUEST_TRACK_URL || process.env.FRONTEND_URL || 'http://localhost:3000')
+        .replace(/\/$/, '')
+        .replace(/\/#.*$/, '')}/guest-letter-track?token=${encodeURIComponent(encryptTrackingToken(studentEmail.toLowerCase().trim()))}`,
     });
   } catch (err) {
     console.error('Guest LOR request error:', err);
@@ -385,7 +390,9 @@ router.get('/requests/:id/tracking-link', authenticate, authorize('ADMIN', 'MENT
     }
 
     const token = encryptTrackingToken(data.student_email.toLowerCase().trim());
-    const trackingUrl = `${process.env.LOR_GUEST_TRACK_URL || process.env.FRONTEND_URL || 'http://localhost:3000'}/#/guest-letter-track?token=${encodeURIComponent(token)}`;
+    const trackingUrl = `${(process.env.LOR_GUEST_TRACK_URL || process.env.FRONTEND_URL || 'http://localhost:3000')
+      .replace(/\/$/, '')
+      .replace(/\/#.*$/, '')}/guest-letter-track?token=${encodeURIComponent(token)}`;
 
     res.json({ trackingUrl });
   } catch (err) {
@@ -501,7 +508,10 @@ router.post('/upload/:accessCode', upload.single('file'), async (req: Request, r
       // Guest student → email with tracking link
       try {
         const trackingToken = encryptTrackingToken(lorReq.student_email.toLowerCase().trim());
-        const trackingUrl = `${process.env.LOR_GUEST_TRACK_URL || process.env.FRONTEND_URL || 'http://localhost:3000'}/#/guest-letter-track?token=${encodeURIComponent(trackingToken)}`;
+        const trackingBase = (process.env.LOR_GUEST_TRACK_URL || process.env.FRONTEND_URL || 'http://localhost:3000')
+        .replace(/\/$/, '')
+        .replace(/\/#.*$/, '');
+      const trackingUrl = `${trackingBase}/guest-letter-track?token=${encodeURIComponent(trackingToken)}`;
 
         const { Resend } = await import('resend');
         const resend = new Resend(process.env.RESEND_API_KEY);

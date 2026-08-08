@@ -36,12 +36,13 @@ interface LOREmailConfig {
 }
 
 function getUploadUrl(accessCode: string): string {
-  // Handle hash-based routing: /#/letter-upload?code=XXX
-  const base = UPLOAD_BASE_URL.replace(/\/$/, '');
-  if (base.includes('#')) {
-    return `${base}?code=${accessCode}`;
+  // Next.js public route (letter writers do not need an account).
+  // Legacy hash routes like `/#/letter-upload` bounce guests to /login.
+  let base = UPLOAD_BASE_URL.replace(/\/$/, '').replace(/\/#.*$/, '');
+  if (/\/letters\/upload$/i.test(base) || /\/letter-upload$/i.test(base)) {
+    return `${base}?code=${encodeURIComponent(accessCode)}`;
   }
-  return `${base}/#/letter-upload?code=${accessCode}`;
+  return `${base}/letters/upload?code=${encodeURIComponent(accessCode)}`;
 }
 
 function formatDate(dateStr: string): string {
@@ -110,7 +111,7 @@ function buildEmailHtml(options: {
       
       <!-- Header with gradient -->
       <div style="background:linear-gradient(135deg, ${accentColor} 0%, ${accentColor}cc 50%, ${accentColor}99 100%);padding:40px 36px;text-align:center;">
-        <img src="${logoUrl}" alt="Dental School Guide" style="height:36px;max-width:180px;object-fit:contain;margin-bottom:20px;" />
+        <img src="${logoUrl}" alt="Dental School Guide" width="36" height="36" style="display:block;width:36px;height:36px;max-width:36px;margin:0 auto 20px auto;border:0;outline:none;-ms-interpolation-mode:bicubic;" />
         <h1 style="font-size:24px;font-weight:800;color:#ffffff;margin:0;line-height:1.3;letter-spacing:-0.5px;">${title}</h1>
       </div>
       
