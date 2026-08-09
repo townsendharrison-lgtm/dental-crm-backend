@@ -902,6 +902,51 @@ router.get('/documents/:requestId', authenticate, authorize('ADMIN'), async (req
   }
 });
 
+// ─── GET /api/lor/documents/:requestId/file — Stream PDF bytes ─
+// Same-origin file proxy for PWA / iOS (window.open + cross-origin
+// <a download> are unreliable in standalone mobile apps).
+router.get('/documents/:requestId/file', authenticate, authorize('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { requestId } = req.params;
+    const forceDownload = req.query.download === 'true';
+
+    const { data: lorReq, error } = await supabaseAdmin
+      .from('lor_requests')
+      .select('document_url, student_name, writer_name')
+      .eq('id', requestId)
+      .single();
+
+    if (error || !lorReq?.document_url) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+
+    const { data: fileBlob, error: downloadError } = await supabaseAdmin
+      .storage
+      .from('lor-documents')
+      .download(lorReq.document_url);
+
+    if (downloadError || !fileBlob) {
+      console.error('LOR document download error:', downloadError?.message);
+      return res.status(500).json({ error: 'Failed to load document' });
+    }
+
+    const buffer = Buffer.from(await fileBlob.arrayBuffer());
+    const safeStudent = String(lorReq.student_name || 'Student').replace(/[^\w.-]+/g, '_');
+    const safeWriter = String(lorReq.writer_name || 'Writer').replace(/[^\w.-]+/g, '_');
+    const fileName = `LOR_${safeStudent}_${safeWriter}.pdf`;
+    const disposition = forceDownload ? 'attachment' : 'inline';
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Length', String(buffer.length));
+    res.setHeader('Content-Disposition', `${disposition}; filename="${fileName}"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(buffer);
+  } catch (err) {
+    console.error('Stream LOR document error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // ─── GET /api/lor/config — Admin gets email config ────────────
 router.get('/config', authenticate, authorize('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
