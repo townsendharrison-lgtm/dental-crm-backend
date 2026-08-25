@@ -35,6 +35,7 @@ import { coursesRouter } from './routes/courses.js';
 import { milestonesRouter } from './routes/milestones.js';
 import { timelineBookshelfRouter } from './routes/timelineBookshelf.js';
 import { nationalBenchmarksRouter } from './routes/nationalBenchmarks.js';
+import { schoolIntelligenceRouter } from './routes/schoolIntelligence.js';
 import { errorHandler } from './middleware/errorHandler.js';
 
 import { startReminderCron } from './services/lorReminderCron.js';
@@ -148,6 +149,7 @@ app.use('/api/courses', coursesRouter);
 app.use('/api/milestones', milestonesRouter);
 app.use('/api/timeline-bookshelf', timelineBookshelfRouter);
 app.use('/api/national-benchmarks', nationalBenchmarksRouter);
+app.use('/api/school-intelligence', schoolIntelligenceRouter);
 
 // Health check
 app.get('/health', (req, res) => {
