@@ -154,7 +154,7 @@ export async function sendInvitationEmail({
 
               <!-- Expiry Notice -->
               <p style="color: #64748b !important; font-size: 13px; line-height: 1.6; margin: 24px 0 0 0;">
-                This invitation link will expire in 7 days. If you didn't expect this email, you can safely ignore it.
+                This invitation link will expire in 2 hours. If you didn't expect this email, you can safely ignore it.
               </p>
             </td>
           </tr>
@@ -191,7 +191,7 @@ You have been invited${inviterText} to join Dental School Guide as a ${roleLabel
 Click the link below to choose your password and activate your account:
 ${actionLink}
 
-This invitation link will expire in 7 days. If you did not expect this email, you can safely ignore it.
+This invitation link will expire in 2 hours. If you did not expect this email, you can safely ignore it.
 
 © ${new Date().getFullYear()} Dental School Guide. All rights reserved.
 `.trim();

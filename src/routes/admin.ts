@@ -184,9 +184,9 @@ router.post('/invite', async (req: AuthRequest, res: Response) => {
       emailSent = true;
     }
 
-    // 3. Track the invitation in our table for admin visibility
+    // 3. Track the invitation in our table for admin visibility (valid for 2 hours)
     const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 7);
+    expiresAt.setHours(expiresAt.getHours() + 2);
 
     const { data: invitation, error: trackError } = await supabaseAdmin
       .from('invitations')
@@ -310,9 +310,9 @@ router.post('/invitations/:id/resend', async (req: AuthRequest, res: Response) =
       emailSent = true;
     }
 
-    // 3. Extend expiration by 7 days and ensure status is PENDING
+    // 3. Extend expiration by 2 hours and ensure status is PENDING
     const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 7);
+    expiresAt.setHours(expiresAt.getHours() + 2);
     await supabaseAdmin
       .from('invitations')
       .update({
