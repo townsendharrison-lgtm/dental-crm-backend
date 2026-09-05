@@ -5,6 +5,7 @@ import { authenticate, authorize, AuthRequest } from '../middleware/auth.js';
 import { VALID_ROLES } from '../types/index.js';
 import type { UserRole } from '../types/index.js';
 import { buildPlatformAnalytics } from '../services/platformAnalytics.js';
+import { sendInvitationEmail } from '../services/inviteEmailService.js';
 
 const router = Router();
 
@@ -110,43 +111,80 @@ router.post('/invite', async (req: AuthRequest, res: Response) => {
       .eq('id', req.user!.id)
       .single();
 
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+    const inviterName = inviter?.name || 'Admin';
+    const redirectUrl = `${frontendUrl}/complete-invitation`;
 
-    // 1. Generate a shareable link FIRST (admin can copy this)
-    // We do this before inviteUserByEmail so the email token (generated second) stays valid.
-    let invitationLink = '';
-    const { data: linkData } = await supabaseAdmin.auth.admin.generateLink({
+    // 1. Generate canonical invite link with user metadata & clean Next.js redirect URL
+    const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
       type: 'invite',
       email,
       options: {
         data: {
           role,
           name: '',
-          invited_by_name: inviter?.name || 'Admin',
+          invited_by_name: inviterName,
         },
-        redirectTo: `${frontendUrl}/#/complete-invitation`,
+        redirectTo: redirectUrl,
       },
     });
+
+    let invitationLink = '';
+    let authUserId = uuidv4();
+    let emailSent = false;
 
     if (linkData?.properties?.action_link) {
       invitationLink = linkData.properties.action_link;
-    }
+      authUserId = linkData.user?.id || authUserId;
 
-    // 2. Send the invite email LAST — its token will be the valid one
-    const { data: inviteData, error: inviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
-      data: {
+      // 2. Dispatch branded email via Resend containing the exact valid action link
+      const emailResult = await sendInvitationEmail({
+        email,
         role,
-        name: '',
-        invited_by_name: inviter?.name || 'Admin',
-      },
-      redirectTo: `${frontendUrl}/#/complete-invitation`,
-    });
+        inviterName,
+        actionLink: invitationLink,
+      });
 
-    if (inviteError) {
-      return res.status(400).json({ error: inviteError.message });
+      if (emailResult.success) {
+        emailSent = true;
+      } else {
+        console.warn(`Resend email delivery skipped/failed (${emailResult.error}), falling back to Supabase email`);
+        // Fallback: inviteUserByEmail if Resend is unavailable
+        const { error: fallbackError } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
+          data: {
+            role,
+            name: '',
+            invited_by_name: inviterName,
+          },
+          redirectTo: redirectUrl,
+        });
+        if (!fallbackError) {
+          emailSent = true;
+        } else {
+          console.error('Supabase fallback invite error:', fallbackError.message);
+        }
+      }
+    } else {
+      console.warn('generateLink did not return action_link, trying inviteUserByEmail directly:', linkError?.message);
+      // Fallback: call inviteUserByEmail directly
+      const { data: inviteData, error: inviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
+        data: {
+          role,
+          name: '',
+          invited_by_name: inviterName,
+        },
+        redirectTo: redirectUrl,
+      });
+
+      if (inviteError) {
+        return res.status(400).json({ error: inviteError.message });
+      }
+
+      authUserId = inviteData.user?.id || authUserId;
+      emailSent = true;
     }
 
-    // Track the invitation in our table for admin visibility
+    // 3. Track the invitation in our table for admin visibility
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7);
 
@@ -156,26 +194,27 @@ router.post('/invite', async (req: AuthRequest, res: Response) => {
         id: uuidv4(),
         email,
         role,
-        token: inviteData.user?.id || uuidv4(), // Store auth user ID as reference
+        token: authUserId,
         invited_by: req.user!.id,
-        invited_by_name: inviter?.name || 'Admin',
+        invited_by_name: inviterName,
         status: 'PENDING',
         created_at: new Date().toISOString(),
-        expires_at: expiresAt.toISOString()
+        expires_at: expiresAt.toISOString(),
       })
       .select()
       .single();
 
     if (trackError) {
       console.error('Failed to track invitation:', trackError.message);
-      // Don't fail — the Supabase invite was already sent
     }
 
     res.json({
-      message: 'Invitation email sent successfully via Supabase',
+      message: emailSent
+        ? 'Invitation email sent successfully'
+        : 'Invitation link generated (email delivery pending)',
       invitation: invitation || { email, role, status: 'PENDING' },
-      invitationLink, // Admin can also copy this link
-      emailSent: true,
+      invitationLink, // Admin can copy this exact valid link
+      emailSent,
     });
   } catch (error) {
     console.error('Create invitation error:', error);
@@ -188,35 +227,106 @@ router.post('/invitations/:id/resend', async (req: AuthRequest, res: Response) =
   try {
     const { id } = req.params;
 
-    // Get the invitation record
+    // Get the invitation record (allow resending if PENDING or EXPIRED)
     const { data: invitation, error: fetchError } = await supabaseAdmin
       .from('invitations')
       .select('*')
       .eq('id', id)
-      .eq('status', 'PENDING')
       .single();
 
-    if (fetchError || !invitation) {
-      return res.status(404).json({ error: 'Invitation not found or already accepted' });
+    if (fetchError || !invitation || invitation.status === 'ACCEPTED') {
+      return res.status(400).json({
+        error: invitation?.status === 'ACCEPTED'
+          ? 'User has already accepted this invitation'
+          : 'Invitation not found',
+      });
     }
 
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+    const inviterName = invitation.invited_by_name || 'Admin';
+    const redirectUrl = `${frontendUrl}/complete-invitation`;
 
-    // Re-invite via Supabase (this resends the email)
-    const { error: reinviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(invitation.email, {
-      data: {
-        role: invitation.role,
-        name: '',
-        invited_by_name: invitation.invited_by_name,
+    // 1. Try generating fresh canonical invite link
+    let newLink = '';
+    let linkDataResult = await supabaseAdmin.auth.admin.generateLink({
+      type: 'invite',
+      email: invitation.email,
+      options: {
+        data: {
+          role: invitation.role,
+          name: '',
+          invited_by_name: inviterName,
+        },
+        redirectTo: redirectUrl,
       },
-      redirectTo: `${frontendUrl}/#/complete-invitation`,
     });
 
-    if (reinviteError) {
-      return res.status(400).json({ error: reinviteError.message });
+    if (linkDataResult.data?.properties?.action_link) {
+      newLink = linkDataResult.data.properties.action_link;
+    } else {
+      // If user was already created in auth.users, generate a magiclink directly
+      const magicResult = await supabaseAdmin.auth.admin.generateLink({
+        type: 'magiclink',
+        email: invitation.email,
+        options: {
+          redirectTo: redirectUrl,
+        },
+      });
+      if (magicResult.data?.properties?.action_link) {
+        newLink = magicResult.data.properties.action_link;
+      }
     }
 
-    res.json({ message: 'Invitation resent successfully' });
+    let emailSent = false;
+    if (newLink) {
+      const emailResult = await sendInvitationEmail({
+        email: invitation.email,
+        role: invitation.role,
+        inviterName,
+        actionLink: newLink,
+      });
+      if (emailResult.success) {
+        emailSent = true;
+      } else {
+        console.warn(`Resend failed during resend (${emailResult.error}), trying Supabase email fallback`);
+      }
+    }
+
+    // 2. Fallback to Supabase email if Resend didn't send
+    if (!emailSent) {
+      const { error: reinviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(invitation.email, {
+        data: {
+          role: invitation.role,
+          name: '',
+          invited_by_name: inviterName,
+        },
+        redirectTo: redirectUrl,
+      });
+
+      if (reinviteError) {
+        console.error('Supabase reinvite fallback error:', reinviteError.message);
+        return res.status(400).json({ error: reinviteError.message });
+      }
+      emailSent = true;
+    }
+
+    // 3. Extend expiration by 7 days and ensure status is PENDING
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 7);
+    await supabaseAdmin
+      .from('invitations')
+      .update({
+        status: 'PENDING',
+        expires_at: expiresAt.toISOString(),
+        created_at: new Date().toISOString(),
+      })
+      .eq('id', id);
+
+    res.json({
+      message: 'Invitation resent successfully',
+      invitationLink: newLink,
+      emailSent,
+    });
   } catch (error) {
     console.error('Resend invitation error:', error);
     res.status(500).json({ error: 'Internal server error' });
