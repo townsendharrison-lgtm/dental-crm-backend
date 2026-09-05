@@ -31,7 +31,9 @@ export async function sendInvitationEmail({
   }
 
   const roleLabel = ROLE_LABELS[role] || role;
-  const subject = `You've been invited to Dental School Guide (${roleLabel})`;
+  const isGenericAdmin = !inviterName || /^(admin|admin user|administrator)$/i.test(inviterName.trim());
+  const inviterText = isGenericAdmin ? '' : ` by ${inviterName.trim()}`;
+  const subject = `You're invited to Dental School Guide`;
 
   const html = `
 <!DOCTYPE html>
@@ -39,155 +41,157 @@ export async function sendInvitationEmail({
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark only">
+  <meta name="supported-color-schemes" content="dark only">
   <title>${subject}</title>
   <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-      line-height: 1.6;
-      color: #334155;
-      background-color: #0f172a;
-      margin: 0;
-      padding: 0;
+    :root {
+      color-scheme: dark only;
+      supported-color-schemes: dark only;
     }
-    .wrapper {
-      max-width: 600px;
-      margin: 32px auto;
-      background: #1e293b;
-      border: 1px solid #334155;
-      border-radius: 16px;
-      overflow: hidden;
-      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+    html, body {
+      margin: 0 !important;
+      padding: 0 !important;
+      width: 100% !important;
+      background-color: #090d16 !important;
+      background: #090d16 !important;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      -webkit-text-size-adjust: 100%;
+      -ms-text-size-adjust: 100%;
     }
-    .header {
-      padding: 36px 32px 28px 32px;
-      text-align: center;
-      background: linear-gradient(180deg, rgba(99, 102, 241, 0.18) 0%, rgba(30, 41, 59, 0) 100%);
-      border-bottom: 1px solid #334155;
+    table, td, a {
+      -webkit-text-size-adjust: 100%;
+      -ms-text-size-adjust: 100%;
     }
-    .brand-title {
-      font-size: 20px;
-      font-weight: 800;
-      color: #ffffff;
-      margin: 0;
-      letter-spacing: -0.02em;
-    }
-    .content {
-      padding: 32px;
-      color: #e2e8f0;
-    }
-    h1 {
-      font-size: 22px;
-      font-weight: 700;
-      color: #ffffff;
-      margin-top: 0;
-      margin-bottom: 16px;
-    }
-    p {
-      margin: 0 0 16px 0;
-      font-size: 15px;
-      color: #cbd5e1;
-    }
-    .badge {
-      display: inline-block;
-      padding: 4px 12px;
-      background-color: rgba(99, 102, 241, 0.2);
-      border: 1px solid rgba(99, 102, 241, 0.4);
-      color: #a5b4fc;
-      border-radius: 9999px;
-      font-size: 13px;
-      font-weight: 600;
-      margin-bottom: 20px;
-    }
-    .btn-container {
-      text-align: center;
-      margin: 32px 0;
-    }
-    .btn {
-      display: inline-block;
-      background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
-      color: #ffffff !important;
+    img {
+      -ms-interpolation-mode: bicubic;
+      border: 0;
+      outline: none;
       text-decoration: none;
-      font-weight: 700;
-      font-size: 15px;
-      padding: 14px 32px;
-      border-radius: 12px;
-      box-shadow: 0 4px 14px 0 rgba(79, 70, 229, 0.4);
     }
-    .btn:hover {
-      background: #4338ca;
-    }
-    .note {
-      font-size: 13px;
-      color: #94a3b8;
-      background: #0f172a;
-      border-radius: 8px;
-      padding: 14px;
-      margin-top: 24px;
-      word-break: break-all;
-    }
-    .note a {
-      color: #818cf8;
-      text-decoration: underline;
-    }
-    .footer {
-      padding: 20px 32px;
-      text-align: center;
-      font-size: 12px;
-      color: #64748b;
-      border-top: 1px solid #334155;
-      background: #0f172a;
+    [data-ogsc] body, [data-ogsb] body,
+    [data-ogsc] .body-bg, [data-ogsb] .body-bg {
+      background-color: #090d16 !important;
+      background: #090d16 !important;
     }
   </style>
 </head>
-<body>
-  <div class="wrapper">
-    <div class="header">
-      <table role="presentation" border="0" cellpadding="0" cellspacing="0" align="center" style="margin: 0 auto 16px auto; border-collapse: collapse;">
-        <tr>
-          <td align="center" valign="middle" style="padding: 0; background: transparent; border: none;">
-            <img src="https://images.squarespace-cdn.com/content/64d0277a0640507c114633ad/b8543df7-ec9e-4d64-912e-e80bb44c8757/Untitled+design-3.png?content-type=image%2Fpng" alt="Dental School Guide" width="60" height="60" style="display: block; margin: 0 auto; width: 60px !important; max-width: 60px !important; height: 60px !important; border: 0; outline: none; text-decoration: none;" />
-          </td>
-        </tr>
-      </table>
-      <div class="brand-title">Dental School Guide</div>
-    </div>
-    <div class="content">
-      <h1>Welcome to Dental School Guide</h1>
-      <p>Hello,</p>
-      <p><strong>${inviterName}</strong> has invited you to join the Dental School Guide platform as a:</p>
-      <div class="badge">${roleLabel}</div>
-      <p>To get started and activate your account, please click the button below to choose your password and complete your profile setup.</p>
-      <div class="btn-container">
-        <a href="${actionLink}" class="btn" target="_blank">Accept Invitation & Set Password &rarr;</a>
-      </div>
-      <div class="note">
-        If the button above does not work, copy and paste this link into your browser:<br>
-        <a href="${actionLink}">${actionLink}</a>
-      </div>
-      <p style="font-size: 13px; color: #94a3b8; margin-top: 20px;">
-        This invitation link is valid for 7 days. If you did not expect this invitation, you can safely ignore this email.
-      </p>
-    </div>
-    <div class="footer">
-      &copy; ${new Date().getFullYear()} Dental School Guide. All rights reserved.
-    </div>
-  </div>
+<body bgcolor="#090d16" style="margin: 0; padding: 0; width: 100% !important; background-color: #090d16 !important; background: #090d16 !important; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+
+  <!-- Outer Full-Width Dark Background Table -->
+  <table role="presentation" width="100%" bgcolor="#090d16" class="body-bg" border="0" cellpadding="0" cellspacing="0" style="width: 100% !important; background-color: #090d16 !important; background: #090d16 !important; margin: 0; padding: 36px 12px; border-collapse: collapse;">
+    <tr>
+      <td align="center" bgcolor="#090d16" class="body-bg" style="background-color: #090d16 !important; background: #090d16 !important;">
+        
+        <!-- Main Card Container -->
+        <table role="presentation" width="100%" bgcolor="#0f172a" border="0" cellpadding="0" cellspacing="0" style="max-width: 580px; margin: 0 auto; background-color: #0f172a !important; background: #0f172a !important; border: 1px solid #1e293b; border-radius: 24px; overflow: hidden; box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.7); border-collapse: separate;">
+          
+          <!-- Header with Vibrant Gradient -->
+          <tr>
+            <td align="center" style="background: linear-gradient(135deg, #4338ca 0%, #6366f1 50%, #818cf8 100%); padding: 44px 32px 36px 32px; text-align: center;">
+              
+              <!-- Clean Logo Without Square/Border (Fixed Dimensions to Prevent Mobile Stretching) -->
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" align="center" style="margin: 0 auto 18px auto; border-collapse: collapse;">
+                <tr>
+                  <td align="center" style="padding: 0; border: none; background: transparent;">
+                    <img src="https://images.squarespace-cdn.com/content/64d0277a0640507c114633ad/b8543df7-ec9e-4d64-912e-e80bb44c8757/Untitled+design-3.png?content-type=image%2Fpng" 
+                         alt="Dental School Guide" 
+                         width="64" 
+                         height="64" 
+                         style="display: block; width: 64px !important; max-width: 64px !important; height: 64px !important; margin: 0 auto; border: 0; outline: none; text-decoration: none;" />
+                  </td>
+                </tr>
+              </table>
+
+              <h1 style="color: #ffffff !important; margin: 0 0 8px 0; font-size: 28px; font-weight: 800; letter-spacing: -0.5px; text-shadow: 0 2px 4px rgba(0,0,0,0.15);">
+                You're Invited! 🎉
+              </h1>
+              <p style="color: rgba(255, 255, 255, 0.9) !important; margin: 0; font-size: 15px; font-weight: 500; letter-spacing: 0.2px;">
+                Welcome to the Dental School Guide team
+              </p>
+            </td>
+          </tr>
+
+          <!-- Body Content -->
+          <tr>
+            <td bgcolor="#0f172a" style="padding: 40px 36px; background-color: #0f172a !important; background: #0f172a !important;">
+              <p style="color: #f8fafc !important; font-size: 16px; font-weight: 600; line-height: 1.6; margin: 0 0 16px 0;">
+                Hi there,
+              </p>
+              <p style="color: #cbd5e1 !important; font-size: 15px; line-height: 1.7; margin: 0 0 18px 0;">
+                You have been invited${inviterText} to join <strong style="color: #c7d2fe !important; font-weight: 700;">Dental School Guide</strong> as a <strong style="color: #a5b4fc !important; font-weight: 700;">${roleLabel}</strong> — our all-in-one platform for dental school applications, mentorship, and resources.
+              </p>
+              <p style="color: #94a3b8 !important; font-size: 15px; line-height: 1.7; margin: 0 0 32px 0;">
+                Click the button below to choose your password and activate your account.
+              </p>
+
+              <!-- CTA Button -->
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="margin: 32px 0;">
+                <tr>
+                  <td align="center">
+                    <table role="presentation" border="0" cellpadding="0" cellspacing="0" style="border-collapse: separate;">
+                      <tr>
+                        <td align="center" style="border-radius: 16px; background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%); box-shadow: 0 8px 25px rgba(79, 70, 229, 0.45);">
+                          <a href="${actionLink}" target="_blank" style="display: inline-block; padding: 16px 44px; font-size: 16px; font-weight: 800; color: #ffffff !important; text-decoration: none; border-radius: 16px; letter-spacing: 0.3px; border: 1px solid rgba(255,255,255,0.15);">
+                            Accept Invitation &rarr;
+                          </a>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Fallback Link Box -->
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" bgcolor="#1e293b" style="background-color: #1e293b !important; background: #1e293b !important; border: 1px solid #334155; border-radius: 12px; margin-top: 24px;">
+                <tr>
+                  <td style="padding: 16px; font-size: 12px; color: #94a3b8 !important; line-height: 1.6; word-break: break-all;">
+                    Button not working? Copy and paste this link into your browser:<br>
+                    <a href="${actionLink}" style="color: #818cf8 !important; text-decoration: underline; font-weight: 500;">${actionLink}</a>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Expiry Notice -->
+              <p style="color: #64748b !important; font-size: 13px; line-height: 1.6; margin: 24px 0 0 0;">
+                This invitation link will expire in 7 days. If you didn't expect this email, you can safely ignore it.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td bgcolor="#0b1120" style="padding: 24px 36px; border-top: 1px solid #1e293b; text-align: center; background-color: #0b1120 !important; background: #0b1120 !important;">
+              <p style="color: #475569 !important; font-size: 11px; margin: 0 0 4px 0; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px;">
+                Powered by
+              </p>
+              <p style="color: #64748b !important; font-size: 12px; margin: 0;">
+                &copy; ${new Date().getFullYear()} Dental School Guide. All rights reserved.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+
 </body>
 </html>
 `;
 
   try {
     const text = `
-Welcome to Dental School Guide!
+You're Invited to Dental School Guide!
 
-Hello,
+Hi there,
 
-${inviterName} has invited you to join the Dental School Guide platform as a ${roleLabel}.
+You have been invited${inviterText} to join Dental School Guide as a ${roleLabel} — our all-in-one platform for dental school applications, mentorship, and resources.
 
-To activate your account and choose your password, please click or open the link below:
+Click the link below to choose your password and activate your account:
 ${actionLink}
 
-This invitation link is valid for 7 days. If you did not expect this invitation, you can safely ignore this email.
+This invitation link will expire in 7 days. If you did not expect this email, you can safely ignore it.
 
 © ${new Date().getFullYear()} Dental School Guide. All rights reserved.
 `.trim();
