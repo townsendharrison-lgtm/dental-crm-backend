@@ -144,8 +144,8 @@ export async function sendInvitationEmail({
     <div class="header">
       <table role="presentation" border="0" cellpadding="0" cellspacing="0" align="center" style="margin: 0 auto 16px auto; border-collapse: collapse;">
         <tr>
-          <td align="center" valign="middle" style="width: 64px; height: 64px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 18px; text-align: center; padding: 0;">
-            <img src="https://images.squarespace-cdn.com/content/64d0277a0640507c114633ad/b8543df7-ec9e-4d64-912e-e80bb44c8757/Untitled+design-3.png?content-type=image%2Fpng" alt="Dental School Guide" width="48" height="48" style="display: block; margin: 0 auto; width: 48px !important; max-width: 48px !important; height: 48px !important; border: 0; outline: none; text-decoration: none;" />
+          <td align="center" valign="middle" style="padding: 0; background: transparent; border: none;">
+            <img src="https://images.squarespace-cdn.com/content/64d0277a0640507c114633ad/b8543df7-ec9e-4d64-912e-e80bb44c8757/Untitled+design-3.png?content-type=image%2Fpng" alt="Dental School Guide" width="60" height="60" style="display: block; margin: 0 auto; width: 60px !important; max-width: 60px !important; height: 60px !important; border: 0; outline: none; text-decoration: none;" />
           </td>
         </tr>
       </table>
