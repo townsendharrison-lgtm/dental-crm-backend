@@ -1,3 +1,4 @@
+import { verifiedResearchRequest } from '../services/verifiedResearchClient.js';
 import { Router, Response } from 'express';
 import multer from 'multer';
 import { supabaseAdmin } from '../config/supabase.js';
@@ -7,10 +8,7 @@ import {
   extractSchoolCriteriaWithGemini,
   saveIngestionResults,
 } from '../services/schoolIntelligenceService.js';
-import {
-  evaluateStudentForSchool,
-  StudentProfileForPrediction,
-} from '../services/predictiveModelService.js';
+
 import {
   syncCrmStudentsToHistorical,
   batchUploadHistorical,
@@ -339,26 +337,17 @@ router.post('/predict', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'studentProfile is required.' });
     }
 
-    let schoolsQuery = supabaseAdmin.from('schools').select('*');
-    if (schoolId) {
-      schoolsQuery = schoolsQuery.eq('id', schoolId);
-    }
-    const { data: schools, error: sErr } = await schoolsQuery;
-    if (sErr || !schools || schools.length === 0) {
-      return res.status(404).json({ error: 'School not found.' });
-    }
-
-    const { data: rubrics } = await supabaseAdmin
-      .from('school_scoring_rubrics')
-      .select('*')
-      .in('school_id', schools.map((s) => s.id));
-
-    const rubricMap = new Map<string, any>();
-    (rubrics || []).forEach((r) => rubricMap.set(r.school_id, r));
-
-    const predictions = schools.map((s) =>
-      evaluateStudentForSchool(studentProfile, s, rubricMap.get(s.id))
-    );
+    const mapped = {
+      name: studentProfile.name, cgpa: studentProfile.cgpa, sgpa: studentProfile.sgpa,
+      dat_aa: studentProfile.datAa, dat_ts: studentProfile.datTs, dat_pat: studentProfile.datPat,
+      dat_type: studentProfile.datType, dat_score_scale: studentProfile.datScoreScale,
+      shadowing_hours: studentProfile.shadowingHours, volunteering_hours: studentProfile.volunteeringHours,
+      research_hours: studentProfile.researchHours, dental_experience_hours: studentProfile.dentalExperienceHours,
+      state: studentProfile.state, total_lor_count: studentProfile.lorCount,
+    };
+    const response = await verifiedResearchRequest('/api/compare/student-all-schools',
+      { custom_student_profile: mapped, school_ids: schoolId ? [schoolId] : undefined }, req.headers.authorization);
+    const predictions = response.comparisons;
 
     res.json({ predictions });
   } catch (error: any) {
@@ -380,79 +369,12 @@ router.get('/student-fit/:studentId', async (req: AuthRequest, res: Response) =>
       return res.status(403).json({ error: 'Access denied.' });
     }
 
-    // 1. Fetch student profile & experiences
-    const { data: profile, error: pErr } = await supabaseAdmin
-      .from('student_profiles')
-      .select('*, user:users(name, email)')
-      .eq('id', studentId)
-      .maybeSingle();
-
-    if (pErr || !profile) {
-      return res.status(404).json({ error: 'Student profile not found.' });
-    }
-
-    const { data: experiences } = await supabaseAdmin
-      .from('experiences')
-      .select('category, total_hours')
-      .eq('student_id', studentId);
-
-    let shadowing = 0;
-    let volunteering = 0;
-    let dental = 0;
-    let research = 0;
-
-    (experiences || []).forEach((exp) => {
-      const cat = (exp.category || '').toLowerCase();
-      const hrs = Number(exp.total_hours || 0);
-      if (cat.includes('shadow')) shadowing += hrs;
-      else if (cat.includes('volunteer') || cat.includes('community')) volunteering += hrs;
-      else if (cat.includes('dental') || cat.includes('assistant') || cat.includes('hygien')) dental += hrs;
-      else if (cat.includes('research')) research += hrs;
-    });
-
-    const studentData: StudentProfileForPrediction = {
-      id: profile.id,
-      name: (profile as any).user?.name || 'Student',
-      cgpa: profile.gpa,
-      sgpa: profile.sgpa,
-      datAa: profile.dat_aa || profile.dat_score,
-      datTs: profile.dat_ts || profile.dat_aa || profile.dat_score,
-      datPat: profile.dat_pat,
-      shadowingHours: shadowing,
-      volunteeringHours: volunteering,
-      dentalExperienceHours: dental,
-      researchHours: research,
-      lorCount: profile.lor_required || 3,
-      state: profile.state,
-      isReapplicant: profile.is_reapplicant,
-      tookCcClasses: profile.took_cc_classes,
-      isCanadianDat: profile.dat_type === 'CANADIAN',
-    };
-
-    // 2. Fetch all schools and rubrics
-    const { data: schools } = await supabaseAdmin
-      .from('schools')
-      .select('*')
-      .order('name', { ascending: true });
-
-    const { data: rubrics } = await supabaseAdmin
-      .from('school_scoring_rubrics')
-      .select('*');
-
-    const rubricMap = new Map<string, any>();
-    (rubrics || []).forEach((r) => rubricMap.set(r.school_id, r));
-
-    const predictions = (schools || []).map((s) =>
-      evaluateStudentForSchool(studentData, s, rubricMap.get(s.id))
-    );
-
-    // Sort predictions: highest matchScore first
-    predictions.sort((a, b) => b.matchScore - a.matchScore);
-
-    res.json({
-      student: studentData,
-      predictions,
-    });
+    const { data: profile } = await supabaseAdmin.from('student_profiles').select('*').eq('id', studentId).maybeSingle();
+    if (!profile) return res.status(404).json({ error: 'Student profile not found.' });
+    if (role === 'MENTOR' && profile.mentor_id !== userId) return res.status(403).json({ error: 'Student is not assigned to this mentor.' });
+    const result = await verifiedResearchRequest('/api/compare/student-all-schools', { student_id: studentId }, req.headers.authorization);
+    res.json({ student: { id: studentId, cgpa: profile.gpa, sgpa: profile.sgpa, datAa: profile.dat_aa,
+      datType: profile.dat_type, datScoreScale: profile.dat_score_scale, state: profile.state }, predictions: result.comparisons });
   } catch (error: any) {
     console.error('Student fit error:', error);
     res.status(500).json({ error: error.message || 'Failed to calculate student fit.' });

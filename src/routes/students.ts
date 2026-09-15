@@ -265,7 +265,7 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
     const commonFields = [
       'zip_code', 'gpa', 'sgpa', 'major', 'dat_score', 'dat_aa', 'dat_ts',
       'dat_pat', 'dat_bio', 'dat_gc', 'dat_oc', 'dat_rc', 'dat_qr', 'dat_sns', 'dat_mdt',
-      'dat_type', 'is_reapplicant', 'applicant_type',
+      'dat_type', 'dat_score_scale', 'criteria_details', 'completed_courses', 'is_reapplicant', 'applicant_type',
       'previous_application_doc_id', 'reapplicant_schools', 'considering_schools',
       'took_online_classes', 'took_cc_classes',
       'additional_schooling', 'additional_schooling_other',
@@ -356,7 +356,7 @@ router.put('/:id', authenticate, async (req: AuthRequest, res: Response) => {
       updates.gpa !== undefined && Number(updates.gpa) !== Number(existingProfile.gpa);
     const datKeys = [
       'dat_score', 'dat_aa', 'dat_ts', 'dat_pat', 'dat_bio', 'dat_gc',
-      'dat_oc', 'dat_rc', 'dat_qr', 'dat_sns', 'dat_mdt', 'dat_type',
+      'dat_oc', 'dat_rc', 'dat_qr', 'dat_sns', 'dat_mdt', 'dat_type', 'dat_score_scale', 'criteria_details', 'completed_courses',
     ] as const;
     const datChanging = datKeys.some((key) => {
       if (updates[key] === undefined) return false;
