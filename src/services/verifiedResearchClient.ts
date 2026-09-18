@@ -1,4 +1,6 @@
-/** Both CRM prediction surfaces use the same verified Python pipeline. */
+/** Legacy helper for the removed LangGraph ai-server paths.
+ *  New school research/scoring calls should use `schoolAiClient.ts`.
+ */
 export async function verifiedResearchRequest(path: string, body: unknown, authorization?: string) {
   const base = process.env.AI_SERVER_URL || 'http://localhost:8000';
   const response = await fetch(`${base}${path}`, {
