@@ -46,7 +46,7 @@ async function request<T>(
   const { baseUrl, apiKey, timeoutMs, fetchImpl } = config(options);
   const headers: Record<string, string> = {};
   if (apiKey) headers['X-School-AI-Key'] = apiKey;
-  let body: BodyInit | undefined;
+  let body: string | FormData | undefined;
   if (options.formData) {
     body = options.formData;
   } else if (options.body !== undefined) {
