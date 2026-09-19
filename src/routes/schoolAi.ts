@@ -202,6 +202,24 @@ router.post('/schools/:aiSchoolId/research', authorize('ADMIN', 'MENTOR_MANAGER'
   }
 });
 
+// Discover trusted official pages (search official domain only) then deep-crawl + extract.
+router.post('/schools/:aiSchoolId/discover-trusted', authorize('ADMIN', 'MENTOR_MANAGER'), async (req, res) => {
+  try {
+    const forceRefresh = String(req.query.force_refresh || '') === 'true';
+    res.json(await ai.discoverTrusted(req.params.aiSchoolId, forceRefresh));
+  } catch (error) {
+    mapAiError(error, res);
+  }
+});
+
+router.get('/schools/:aiSchoolId/coverage', authorize('ADMIN', 'MENTOR_MANAGER', 'MENTOR'), async (req, res) => {
+  try {
+    res.json(await ai.getCoverage(req.params.aiSchoolId));
+  } catch (error) {
+    mapAiError(error, res);
+  }
+});
+
 // Targeted deep crawl of an admin-provided URL (same-host subpages).
 router.post('/schools/:aiSchoolId/crawl-url', authorize('ADMIN', 'MENTOR_MANAGER'), async (req, res) => {
   try {

@@ -113,6 +113,23 @@ export function createSchoolAiClient(options: SchoolAiClientOptions = {}) {
         options,
       ),
 
+    discoverTrusted: (schoolId: string, forceRefresh = false) =>
+      request<{ job_id: string; status: string; cached: boolean }>(
+        'POST',
+        `/schools/${schoolId}/discover-trusted${forceRefresh ? '?force_refresh=true' : ''}`,
+        options,
+      ),
+
+    getCoverage: (schoolId: string) =>
+      request<{
+        school_id: string;
+        filled: number;
+        total: number;
+        coverage_pct: number;
+        by_category: Record<string, { total: number; filled: number }>;
+        taxonomy_version: string;
+      }>('GET', `/schools/${schoolId}/coverage`, options),
+
     crawlUrl: (schoolId: string, url: string, forceRefresh = false) =>
       request<{ job_id: string; status: string; cached: boolean }>(
         'POST',
