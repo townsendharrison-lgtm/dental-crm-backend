@@ -1,8 +1,13 @@
 import { Router, Response } from 'express';
 import { supabaseAdmin } from '../config/supabase.js';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth.js';
+import {
+  createSchoolAiClient,
+  SchoolAiClientError,
+} from '../services/schoolAiClient.js';
 
 const router = Router();
+const ai = createSchoolAiClient();
 
 // All routes require authentication
 router.use(authenticate);
@@ -273,7 +278,8 @@ router.put('/:id', authorize('ADMIN'), async (req: AuthRequest, res: Response) =
 });
 
 // ─── DELETE /api/schools/:id ─────────────────────────────────────────
-// Delete school profile (Admin only)
+// Delete school profile (Admin only). Also wipes linked school-ai data and
+// CRM comparisons (school_ai_scores / facts_cache CASCADE with this row).
 router.delete('/:id', authorize('ADMIN'), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
@@ -288,6 +294,24 @@ router.delete('/:id', authorize('ADMIN'), async (req: AuthRequest, res: Response
       return res.status(404).json({ error: 'School not found' });
     }
 
+    const aiSchoolId = existing.ai_school_id ? String(existing.ai_school_id) : null;
+    let aiDeleted = false;
+    if (aiSchoolId) {
+      try {
+        await ai.deleteSchool(aiSchoolId);
+        aiDeleted = true;
+      } catch (err) {
+        // If the AI school is already gone, continue CRM delete.
+        if (!(err instanceof SchoolAiClientError && err.status === 404)) {
+          console.warn('school-ai delete failed:', err instanceof Error ? err.message : err);
+          return res.status(502).json({
+            error: 'Failed to delete linked school-ai research data; CRM school was not removed',
+            detail: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
     const { error } = await supabaseAdmin
       .from('schools')
       .delete()
@@ -297,7 +321,11 @@ router.delete('/:id', authorize('ADMIN'), async (req: AuthRequest, res: Response
       return res.status(500).json({ error: error.message });
     }
 
-    res.json({ message: 'School profile deleted successfully from directory' });
+    res.json({
+      message: 'School profile deleted successfully from directory',
+      aiDeleted,
+      comparisonsRemoved: true,
+    });
   } catch (error: any) {
     console.error('Delete school error:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });

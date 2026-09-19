@@ -87,6 +87,13 @@ export function createSchoolAiClient(options: SchoolAiClientOptions = {}) {
         body: { name, official_url: officialUrl },
       }),
 
+    deleteSchool: (schoolId: string) =>
+      request<{ school_id: string; deleted: boolean; documents_removed: number }>(
+        'DELETE',
+        `/schools/${schoolId}`,
+        options,
+      ),
+
     uploadDocument: async (schoolId: string, file: Blob | ArrayBuffer | Uint8Array, filename: string, forceRefresh = false) => {
       const form = new FormData();
       const blob = file instanceof Blob ? file : new Blob([file]);
@@ -112,6 +119,16 @@ export function createSchoolAiClient(options: SchoolAiClientOptions = {}) {
         `/schools/${schoolId}/crawl-url${forceRefresh ? '?force_refresh=true' : ''}`,
         { ...options, body: { url } },
       ),
+
+    upsertManualFact: (
+      schoolId: string,
+      factorKey: string,
+      payload: { value?: unknown; unit?: string | null; editor: string; reason: string; confidence?: number },
+    ) =>
+      request('PATCH', `/schools/${schoolId}/facts/${encodeURIComponent(factorKey)}`, {
+        ...options,
+        body: payload,
+      }),
 
     listSchoolSources: (schoolId: string) =>
       request<{

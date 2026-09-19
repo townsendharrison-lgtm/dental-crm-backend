@@ -202,13 +202,52 @@ router.post('/schools/:aiSchoolId/research', authorize('ADMIN', 'MENTOR_MANAGER'
   }
 });
 
-// Targeted crawl of an admin-provided URL (e.g. the school's official page).
+// Targeted deep crawl of an admin-provided URL (same-host subpages).
 router.post('/schools/:aiSchoolId/crawl-url', authorize('ADMIN', 'MENTOR_MANAGER'), async (req, res) => {
   try {
     const url = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
     if (!url) return res.status(400).json({ error: 'url is required' });
     const forceRefresh = String(req.query.force_refresh || '') === 'true';
     res.json(await ai.crawlUrl(req.params.aiSchoolId, url, forceRefresh));
+  } catch (error) {
+    mapAiError(error, res);
+  }
+});
+
+// Manual correction of a raw fact value.
+router.patch('/schools/:aiSchoolId/facts/:factorKey', authorize('ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res) => {
+  try {
+    const editor = (req.body?.editor as string) || req.user?.email || req.user?.id || 'crm-admin';
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    if (!reason) return res.status(400).json({ error: 'reason is required' });
+    res.json(await ai.upsertManualFact(req.params.aiSchoolId, req.params.factorKey, {
+      value: req.body?.value,
+      unit: req.body?.unit ?? null,
+      editor,
+      reason,
+      confidence: typeof req.body?.confidence === 'number' ? req.body.confidence : 1,
+    }));
+  } catch (error) {
+    mapAiError(error, res);
+  }
+});
+
+// Manual override of a rubric factor value/weight.
+router.patch('/schools/:aiSchoolId/rubric/:factorKey', authorize('ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res) => {
+  try {
+    const editor = (req.body?.editor as string) || req.user?.email || req.user?.id || 'crm-admin';
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : 'Admin correction';
+    const reasoning = typeof req.body?.reasoning === 'string' ? req.body.reasoning.trim() : reason;
+    if (!reasoning) return res.status(400).json({ error: 'reasoning is required' });
+    res.json(await ai.overrideRubricFactor(req.params.aiSchoolId, req.params.factorKey, {
+      value: req.body?.value,
+      weight: req.body?.weight,
+      confidence: req.body?.confidence,
+      reasoning,
+      editor,
+      reason,
+      source_urls: Array.isArray(req.body?.source_urls) ? req.body.source_urls : undefined,
+    }));
   } catch (error) {
     mapAiError(error, res);
   }
