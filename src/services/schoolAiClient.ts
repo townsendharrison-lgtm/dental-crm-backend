@@ -113,6 +113,25 @@ export function createSchoolAiClient(options: SchoolAiClientOptions = {}) {
         { ...options, body: { url } },
       ),
 
+    listSchoolSources: (schoolId: string) =>
+      request<{
+        school_id: string;
+        documents: Array<{
+          document_id: string;
+          filename: string;
+          source_type: string;
+          source_url?: string | null;
+          parsed_status: string;
+          byte_size?: number | null;
+          created_at?: string | null;
+          job_id?: string | null;
+          job_status?: string | null;
+        }>;
+        web_sources: Array<{ url: string; fact_count: number; last_seen_at?: string | null }>;
+        document_count: number;
+        web_source_count: number;
+      }>('GET', `/schools/${schoolId}/sources`, options),
+
     getSchoolFacts: (schoolId: string) =>
       request<{ school_id: string; fact_count: number; facts: Array<Record<string, unknown>> }>(
         'GET',
@@ -198,6 +217,13 @@ export function createSchoolAiClient(options: SchoolAiClientOptions = {}) {
         skipped: unknown[];
         reasoning: string;
         scoring_run_id?: string;
+        probabilities?: {
+          interview_probability: number;
+          acceptance_probability: number;
+          waitlist_probability: number;
+          reject_probability: number;
+          probability_kind: string;
+        };
       }>('POST', `/schools/${schoolId}/score`, {
         ...options,
         body: { student_id: studentId, attributes },

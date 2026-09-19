@@ -35,13 +35,29 @@ function profileToAttributes(profile: Record<string, unknown>): Record<string, u
   const datAa = profile.dat_aa ?? profile.datAa;
   const datTs = profile.dat_ts ?? profile.datTs;
   const datPat = profile.dat_pat ?? profile.datPat;
+  const datBio = profile.dat_bio ?? profile.datBio;
+  const datGc = profile.dat_gc ?? profile.datGc;
+  const datOc = profile.dat_oc ?? profile.datOc;
+  const datRc = profile.dat_rc ?? profile.datRc;
+  const datQr = profile.dat_qr ?? profile.datQr;
   const shadowing = profile.shadowing_hours ?? profile.shadowingHours;
+  const datScale = profile.dat_score_scale ?? profile.datScoreScale;
   if (gpa != null && gpa !== '') attrs.avg_gpa = Number(gpa);
   if (sgpa != null && sgpa !== '') attrs.avg_science_gpa = Number(sgpa);
+  // Taxonomy keys are avg_dat_*; CRM stores section columns without the avg_ prefix.
   if (datAa != null && datAa !== '') attrs.avg_dat_aa = Number(datAa);
-  if (datTs != null && datTs !== '') attrs.avg_dat_ts = Number(datTs);
+  if (datTs != null && datTs !== '') attrs.avg_dat_total_science = Number(datTs);
   if (datPat != null && datPat !== '') attrs.avg_dat_pat = Number(datPat);
+  if (datBio != null && datBio !== '') attrs.avg_dat_biology = Number(datBio);
+  if (datGc != null && datGc !== '') attrs.avg_dat_general_chemistry = Number(datGc);
+  if (datOc != null && datOc !== '') attrs.avg_dat_organic_chemistry = Number(datOc);
+  if (datRc != null && datRc !== '') attrs.avg_dat_reading_comprehension = Number(datRc);
+  if (datQr != null && datQr !== '') attrs.avg_dat_quantitative_reasoning = Number(datQr);
   if (shadowing != null && shadowing !== '') attrs.shadowing_hours = Number(shadowing);
+  // Hint for dual-scale DAT scoring (legacy 1–30 vs modern 200–600).
+  if (datScale != null && String(datScale).trim() !== '') {
+    attrs.dat_score_scale = String(datScale).trim();
+  }
   return attrs;
 }
 
@@ -193,6 +209,15 @@ router.post('/schools/:aiSchoolId/crawl-url', authorize('ADMIN', 'MENTOR_MANAGER
     if (!url) return res.status(400).json({ error: 'url is required' });
     const forceRefresh = String(req.query.force_refresh || '') === 'true';
     res.json(await ai.crawlUrl(req.params.aiSchoolId, url, forceRefresh));
+  } catch (error) {
+    mapAiError(error, res);
+  }
+});
+
+// List documents + crawled web sources for a school.
+router.get('/schools/:aiSchoolId/sources', authorize('ADMIN', 'MENTOR_MANAGER', 'MENTOR'), async (req, res) => {
+  try {
+    res.json(await ai.listSchoolSources(req.params.aiSchoolId));
   } catch (error) {
     mapAiError(error, res);
   }
@@ -359,6 +384,7 @@ router.post('/schools/:crmSchoolId/score-refresh', authorize('ADMIN', 'MENTOR_MA
     if (profile) attrs = profileToAttributes(profile);
 
     const result = await ai.scoreStudent(aiSchoolId, studentId, attrs);
+    const probs = result.probabilities;
     const now = new Date().toISOString();
     const row = {
       school_id: crmSchool.id,
@@ -371,6 +397,11 @@ router.post('/schools/:crmSchoolId/score-refresh', authorize('ADMIN', 'MENTOR_MA
       skipped: result.skipped ?? [],
       attributes_used: attrs,
       scoring_run_id: result.scoring_run_id ?? null,
+      interview_probability: probs?.interview_probability ?? null,
+      acceptance_probability: probs?.acceptance_probability ?? null,
+      waitlist_probability: probs?.waitlist_probability ?? null,
+      reject_probability: probs?.reject_probability ?? null,
+      probability_kind: probs?.probability_kind ?? null,
       updated_at: now,
     };
     const { data, error } = await supabaseAdmin
@@ -379,7 +410,7 @@ router.post('/schools/:crmSchoolId/score-refresh', authorize('ADMIN', 'MENTOR_MA
       .select('*')
       .single();
     if (error) {
-      console.warn('Could not persist score (apply migration 060):', error.message);
+      console.warn('Could not persist score (apply migrations 060/061):', error.message);
       return res.json({ score: row, persisted: false });
     }
     res.json({ score: data, persisted: true });
