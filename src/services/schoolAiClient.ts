@@ -106,6 +106,20 @@ export function createSchoolAiClient(options: SchoolAiClientOptions = {}) {
         options,
       ),
 
+    crawlUrl: (schoolId: string, url: string, forceRefresh = false) =>
+      request<{ job_id: string; status: string; cached: boolean }>(
+        'POST',
+        `/schools/${schoolId}/crawl-url${forceRefresh ? '?force_refresh=true' : ''}`,
+        { ...options, body: { url } },
+      ),
+
+    getSchoolFacts: (schoolId: string) =>
+      request<{ school_id: string; fact_count: number; facts: Array<Record<string, unknown>> }>(
+        'GET',
+        `/schools/${schoolId}/facts`,
+        options,
+      ),
+
     getJob: (jobId: string) =>
       request<{
         job_id: string;

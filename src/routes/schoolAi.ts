@@ -74,6 +74,28 @@ async function ensureLinkedAiSchool(
   return { aiSchoolId: created.school_id, created: true };
 }
 
+type CrmSchoolRow = {
+  id: string;
+  name: string;
+  ai_school_id?: string | null;
+  notes?: string | null;
+};
+
+// Load a CRM school and ensure it is linked to a school-ai-service UUID.
+async function resolveLinkedSchool(
+  crmSchoolId: string,
+  officialUrl?: string,
+): Promise<{ crmSchool: CrmSchoolRow; aiSchoolId: string } | { error: string; status: number }> {
+  const { data, error } = await supabaseAdmin
+    .from('schools')
+    .select('id, name, ai_school_id, notes')
+    .eq('id', crmSchoolId)
+    .maybeSingle();
+  if (error || !data) return { error: 'CRM school not found', status: 404 };
+  const linked = await ensureLinkedAiSchool(data as CrmSchoolRow, officialUrl);
+  return { crmSchool: data as CrmSchoolRow, aiSchoolId: linked.aiSchoolId };
+}
+
 // ─── Health (authenticated) ──────────────────────────────────────────
 router.get('/health', authorize('ADMIN', 'MENTOR_MANAGER', 'MENTOR'), async (_req, res) => {
   try {
@@ -164,6 +186,18 @@ router.post('/schools/:aiSchoolId/research', authorize('ADMIN', 'MENTOR_MANAGER'
   }
 });
 
+// Targeted crawl of an admin-provided URL (e.g. the school's official page).
+router.post('/schools/:aiSchoolId/crawl-url', authorize('ADMIN', 'MENTOR_MANAGER'), async (req, res) => {
+  try {
+    const url = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+    if (!url) return res.status(400).json({ error: 'url is required' });
+    const forceRefresh = String(req.query.force_refresh || '') === 'true';
+    res.json(await ai.crawlUrl(req.params.aiSchoolId, url, forceRefresh));
+  } catch (error) {
+    mapAiError(error, res);
+  }
+});
+
 router.get('/jobs/:jobId', authorize('ADMIN', 'MENTOR_MANAGER', 'MENTOR'), async (req, res) => {
   try {
     res.json(await ai.getJob(req.params.jobId));
@@ -226,6 +260,129 @@ router.post('/schools/:aiSchoolId/score', authorize('ADMIN', 'MENTOR_MANAGER', '
       if (profile) attrs = profileToAttributes(profile);
     }
     res.json(await ai.scoreStudent(req.params.aiSchoolId, String(studentId), attrs));
+  } catch (error) {
+    mapAiError(error, res);
+  }
+});
+
+// ─── Cached facts + rubric snapshot (CRM-school keyed) ───────────────
+// Fast read straight from Supabase; does not call Python.
+router.get('/schools/:crmSchoolId/facts-cache', authorize('ADMIN', 'MENTOR_MANAGER', 'MENTOR'), async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('school_ai_facts_cache')
+      .select('*')
+      .eq('school_id', req.params.crmSchoolId)
+      .maybeSingle();
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ cache: data || null });
+  } catch (error) {
+    mapAiError(error, res);
+  }
+});
+
+// Refresh facts + rubric from Python and upsert the Supabase cache.
+router.post('/schools/:crmSchoolId/facts-refresh', authorize('ADMIN', 'MENTOR_MANAGER'), async (req, res) => {
+  try {
+    const officialUrl = typeof req.body?.officialUrl === 'string' ? req.body.officialUrl : undefined;
+    const resolved = await resolveLinkedSchool(req.params.crmSchoolId, officialUrl);
+    if ('error' in resolved) return res.status(resolved.status).json({ error: resolved.error });
+    const { crmSchool, aiSchoolId } = resolved;
+
+    const [factsResult, rubricResult] = await Promise.allSettled([
+      ai.getSchoolFacts(aiSchoolId),
+      ai.getRubric(aiSchoolId),
+    ]);
+    const facts = factsResult.status === 'fulfilled' ? factsResult.value.facts : [];
+    const rubric = rubricResult.status === 'fulfilled' ? rubricResult.value : null;
+    const rubricStatus = rubric && typeof rubric === 'object' && 'rubric_status' in rubric
+      ? String((rubric as { rubric_status: unknown }).rubric_status)
+      : null;
+
+    const now = new Date().toISOString();
+    const row = {
+      school_id: crmSchool.id,
+      ai_school_id: aiSchoolId,
+      raw_facts: facts,
+      rubric,
+      fact_count: Array.isArray(facts) ? facts.length : 0,
+      rubric_status: rubricStatus,
+      refreshed_at: now,
+      updated_at: now,
+    };
+    const { data, error } = await supabaseAdmin
+      .from('school_ai_facts_cache')
+      .upsert(row, { onConflict: 'school_id' })
+      .select('*')
+      .single();
+    if (error) {
+      console.warn('Could not persist facts cache (apply migration 060):', error.message);
+      return res.json({ cache: row, persisted: false });
+    }
+    res.json({ cache: data, persisted: true });
+  } catch (error) {
+    mapAiError(error, res);
+  }
+});
+
+// ─── Persisted student ↔ school comparisons ──────────────────────────
+// Read saved fit scores for a student (fast, from Supabase).
+router.get('/students/:studentId/scores', authorize('ADMIN', 'MENTOR_MANAGER', 'MENTOR'), async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('school_ai_scores')
+      .select('*, schools(id, name)')
+      .eq('student_id', req.params.studentId)
+      .order('score', { ascending: false, nullsFirst: false });
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ scores: data || [] });
+  } catch (error) {
+    mapAiError(error, res);
+  }
+});
+
+// Re-run a single school↔student comparison via Python and upsert it.
+router.post('/schools/:crmSchoolId/score-refresh', authorize('ADMIN', 'MENTOR_MANAGER', 'MENTOR'), async (req: AuthRequest, res) => {
+  try {
+    const studentId = typeof req.body?.studentId === 'string' ? req.body.studentId : '';
+    if (!studentId) return res.status(400).json({ error: 'studentId is required' });
+    const resolved = await resolveLinkedSchool(req.params.crmSchoolId);
+    if ('error' in resolved) return res.status(resolved.status).json({ error: resolved.error });
+    const { crmSchool, aiSchoolId } = resolved;
+
+    let attrs: Record<string, unknown> = {};
+    const { data: profile } = await supabaseAdmin
+      .from('student_profiles')
+      .select('*')
+      .eq('id', studentId)
+      .maybeSingle();
+    if (profile) attrs = profileToAttributes(profile);
+
+    const result = await ai.scoreStudent(aiSchoolId, studentId, attrs);
+    const now = new Date().toISOString();
+    const row = {
+      school_id: crmSchool.id,
+      student_id: studentId,
+      ai_school_id: aiSchoolId,
+      score: Number(result.score),
+      score_kind: result.score_kind,
+      reasoning: result.reasoning,
+      per_factor_breakdown: result.per_factor_breakdown ?? [],
+      skipped: result.skipped ?? [],
+      attributes_used: attrs,
+      scoring_run_id: result.scoring_run_id ?? null,
+      updated_at: now,
+    };
+    const { data, error } = await supabaseAdmin
+      .from('school_ai_scores')
+      .upsert(row, { onConflict: 'school_id,student_id' })
+      .select('*')
+      .single();
+    if (error) {
+      console.warn('Could not persist score (apply migration 060):', error.message);
+      return res.json({ score: row, persisted: false });
+    }
+    res.json({ score: data, persisted: true });
   } catch (error) {
     mapAiError(error, res);
   }
