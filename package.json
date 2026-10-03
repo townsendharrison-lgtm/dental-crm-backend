@@ -9,7 +9,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "lint": "tsc --noEmit",
-    "seed-admin": "tsx scripts/seed-admin.ts"
+    "seed-admin": "tsx scripts/seed-admin.ts",
+    "meet:spike": "tsx scripts/meet-spike.ts"
   },
   "keywords": [
     "dental",
@@ -27,6 +28,7 @@
     "express": "^4.18.2",
     "express-rate-limit": "^7.1.5",
     "firebase-admin": "^13.8.0",
+    "google-auth-library": "^9.15.1",
     "helmet": "^7.1.0",
     "joi": "^17.11.0",
     "multer": "^2.1.1",

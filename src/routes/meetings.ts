@@ -11,9 +11,98 @@ import {
   type MeetingAudience,
 } from '../services/meetingNotifications.js';
 import { dismissRelatedNotifications } from '../services/dismissNotifications.js';
+import {
+  authMode,
+  buildConnectUrl,
+  canConnectViaBrowser,
+  connectedAccount,
+  disconnectGoogle,
+  dsgUserEmail,
+  googleMeetEnabled,
+} from '../services/google/googleAuth.js';
+import { googleOAuthRedirectUri } from './googleOAuth.js';
+import { pingCalendar } from '../services/google/meetClient.js';
+import {
+  cancelMeetingGoogle,
+  provisionMeetingGoogle,
+  shouldAutoProvision,
+  syncMeetingArtifacts,
+  syncMeetingGoogleOnUpdate,
+} from '../services/google/meetingGoogleSync.js';
 
 const router = Router();
 router.use(authenticate);
+
+const STAFF_ONLY_MEETING_FIELDS = [
+  'mentor_notes',
+  'transcript_doc_url',
+  'notes_doc_url',
+  'meet_error',
+  'google_calendar_event_id',
+  'conference_record_name',
+] as const;
+
+function stripForRole<T extends Record<string, any>>(meeting: T, role: string): T {
+  if (role !== 'STUDENT') return meeting;
+  const copy: Record<string, any> = { ...meeting };
+  for (const key of STAFF_ONLY_MEETING_FIELDS) delete copy[key];
+  return copy as T;
+}
+
+async function reloadMeeting(id: string) {
+  const { data } = await supabaseAdmin.from('meetings').select('*').eq('id', id).maybeSingle();
+  return data;
+}
+
+// ─── GET /api/meetings/google-meet/status ─────────────────────────────
+// Admin health check for the DSG Google Workspace integration.
+router.get('/google-meet/status', async (req: AuthRequest, res: Response) => {
+  if (req.user!.role !== 'ADMIN') return res.status(403).json({ error: 'Access denied' });
+  const flagOn = (process.env.GOOGLE_MEET_ENABLED || '').toLowerCase() === 'true';
+  const base = {
+    enabled: googleMeetEnabled(),
+    featureFlag: flagOn,
+    authMode: authMode(),
+    ownerEmail: dsgUserEmail(),
+    canConnect: canConnectViaBrowser(),
+    connectedAccount: connectedAccount(),
+    autoRecord: (process.env.GOOGLE_MEET_AUTO_RECORD || '').toLowerCase() === 'true',
+  };
+  if (!base.authMode) return res.json({ ...base, connected: false, error: 'Google account not connected' });
+  try {
+    const cal = await pingCalendar();
+    res.json({ ...base, connected: true, calendarId: cal.id, calendarTimeZone: cal.timeZone });
+  } catch (error: any) {
+    res.json({ ...base, connected: false, error: error.message });
+  }
+});
+
+// ─── POST /api/meetings/google-meet/connect ───────────────────────────
+// Returns the Google sign-in URL; the DSG admin signs in as the owner account.
+router.post('/google-meet/connect', async (req: AuthRequest, res: Response) => {
+  if (req.user!.role !== 'ADMIN') return res.status(403).json({ error: 'Access denied' });
+  try {
+    const returnTo =
+      typeof req.body?.returnTo === 'string' && req.body.returnTo.startsWith('/')
+        ? req.body.returnTo
+        : '/admin/rules-engine?tab=platform';
+    const url = buildConnectUrl(googleOAuthRedirectUri(req), req.user!.id, returnTo);
+    res.json({ url, redirectUri: googleOAuthRedirectUri(req) });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// ─── DELETE /api/meetings/google-meet/connect ─────────────────────────
+router.delete('/google-meet/connect', async (req: AuthRequest, res: Response) => {
+  if (req.user!.role !== 'ADMIN') return res.status(403).json({ error: 'Access denied' });
+  try {
+    await disconnectGoogle();
+    res.json({ ok: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 const VALID_AUDIENCES: MeetingAudience[] = [
   'ADMIN_DIRECT',
@@ -240,10 +329,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         student: m.student_id ? usersMap.get(m.student_id) : null,
         resolvedAttendees: (m.attendees || []).map((aId: string) => usersMap.get(aId)).filter(Boolean),
       };
-      if (role === 'STUDENT') {
-        delete (base as any).mentor_notes;
-      }
-      return base;
+      return stripForRole(base, role);
     });
 
     res.json({ meetings: enriched });
@@ -281,15 +367,20 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
     const usersMap = new Map<string, any>();
     if (users) users.forEach((u) => usersMap.set(u.id, u));
 
-    if (role === 'STUDENT') delete meeting.mentor_notes;
-
-    res.json({
-      ...meeting,
-      audience: normalizeAudience(meeting),
-      mentor: usersMap.get(meeting.mentor_id) || null,
-      student: meeting.student_id ? usersMap.get(meeting.student_id) : null,
-      resolvedAttendees: (meeting.attendees || []).map((aId: string) => usersMap.get(aId)).filter(Boolean),
-    });
+    res.json(
+      stripForRole(
+        {
+          ...meeting,
+          audience: normalizeAudience(meeting),
+          mentor: usersMap.get(meeting.mentor_id) || null,
+          student: meeting.student_id ? usersMap.get(meeting.student_id) : null,
+          resolvedAttendees: (meeting.attendees || [])
+            .map((aId: string) => usersMap.get(aId))
+            .filter(Boolean),
+        },
+        role,
+      ),
+    );
   } catch (error: any) {
     console.error('Fetch meeting details error:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
@@ -377,6 +468,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       link,
       attendees = [],
       counterpartyType, // 'student' | 'mentor' for ADMIN_DIRECT
+      autoMeet, // false = skip automatic Google Meet link
     } = req.body;
 
     if (!title || !date) {
@@ -464,13 +556,19 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 
     if (error) return res.status(400).json({ error: error.message });
 
+    let created = newMeeting;
+    if (shouldAutoProvision(newMeeting, autoMeet === false ? false : undefined)) {
+      await provisionMeetingGoogle(newMeeting.id);
+      created = (await reloadMeeting(newMeeting.id)) || newMeeting;
+    }
+
     void notifyMeetingParties({
-      meeting: newMeeting,
+      meeting: created,
       actorId: userId,
       kind: 'created',
     });
 
-    res.status(201).json({ ...newMeeting, audience: normalizeAudience(newMeeting) });
+    res.status(201).json({ ...created, audience: normalizeAudience(created) });
   } catch (error: any) {
     console.error('Schedule meeting error:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
@@ -553,7 +651,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    const { data: updated, error } = await supabaseAdmin
+    const { data: updatedRow, error } = await supabaseAdmin
       .from('meetings')
       .update(dbUpdates)
       .eq('id', id)
@@ -561,6 +659,12 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
       .single();
 
     if (error) return res.status(500).json({ error: error.message });
+
+    let updated = updatedRow;
+    if (role !== 'STUDENT' && !updatedRow.completed) {
+      await syncMeetingGoogleOnUpdate(existing, updatedRow);
+      updated = (await reloadMeeting(id)) || updatedRow;
+    }
 
     // Completing a meeting often also normalizes title/date/duration — that is not a reschedule.
     const becomingCompleted = !existing.completed && !!updated.completed;
@@ -580,7 +684,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
       });
     }
 
-    res.json({ ...updated, audience: normalizeAudience(updated) });
+    res.json(stripForRole({ ...updated, audience: normalizeAudience(updated) }, role));
   } catch (error: any) {
     console.error('Update meeting error:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
@@ -621,6 +725,8 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
       relatedId: id,
     });
 
+    void cancelMeetingGoogle(existing);
+
     void notifyMeetingParties({
       meeting: existing,
       actorId: userId,
@@ -630,6 +736,73 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
     res.json({ message: 'Meeting cancelled successfully' });
   } catch (error: any) {
     console.error('Delete meeting error:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+async function loadManageableMeeting(req: AuthRequest, res: Response) {
+  const role = req.user!.role;
+  const userId = req.user!.id;
+  const { data: meeting } = await supabaseAdmin
+    .from('meetings')
+    .select('*')
+    .eq('id', req.params.id)
+    .maybeSingle();
+  if (!meeting) {
+    res.status(404).json({ error: 'Meeting not found' });
+    return null;
+  }
+  const isPrivileged = role === 'ADMIN' || role === 'MENTOR_MANAGER';
+  if (!isPrivileged && meeting.mentor_id !== userId) {
+    res.status(403).json({ error: 'Access denied' });
+    return null;
+  }
+  if (role === 'MENTOR_MANAGER' && isHiddenFromMentorManager(normalizeAudience(meeting))) {
+    res.status(403).json({ error: 'Access denied' });
+    return null;
+  }
+  if (!googleMeetEnabled()) {
+    res.status(400).json({ error: 'Google Meet automation is not configured' });
+    return null;
+  }
+  return meeting;
+}
+
+// ─── POST /api/meetings/:id/google-meet/provision ────────────────────
+// Create or retry the Meet space + DSG calendar invite.
+router.post('/:id/google-meet/provision', async (req: AuthRequest, res: Response) => {
+  try {
+    const meeting = await loadManageableMeeting(req, res);
+    if (!meeting) return;
+    if (meeting.link && !/^https:\/\/meet\.google\.com\//i.test(meeting.link) && !meeting.google_space_name) {
+      return res.status(400).json({ error: 'This meeting uses a custom link. Clear it first.' });
+    }
+    if (meeting.meet_status === 'provisioned' || meeting.meet_status === 'pending') {
+      await supabaseAdmin.from('meetings').update({ meet_status: 'failed' }).eq('id', meeting.id);
+    }
+    await provisionMeetingGoogle(meeting.id);
+    const fresh = await reloadMeeting(meeting.id);
+    res.json({ ...fresh, audience: normalizeAudience(fresh) });
+  } catch (error: any) {
+    console.error('Provision Google Meet error:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// ─── POST /api/meetings/:id/google-meet/sync ─────────────────────────
+// Pull transcripts / Gemini notes now instead of waiting for the cron.
+router.post('/:id/google-meet/sync', async (req: AuthRequest, res: Response) => {
+  try {
+    const meeting = await loadManageableMeeting(req, res);
+    if (!meeting) return;
+    if (!meeting.google_space_name) {
+      return res.status(400).json({ error: 'This meeting has no Google Meet space' });
+    }
+    const result = await syncMeetingArtifacts(meeting, { force: req.body?.force === true });
+    const fresh = await reloadMeeting(meeting.id);
+    res.json({ result, meeting: { ...fresh, audience: normalizeAudience(fresh) } });
+  } catch (error: any) {
+    console.error('Sync Google Meet artifacts error:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });

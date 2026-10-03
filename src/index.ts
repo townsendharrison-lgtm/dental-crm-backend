@@ -37,11 +37,14 @@ import { timelineBookshelfRouter } from './routes/timelineBookshelf.js';
 import { nationalBenchmarksRouter } from './routes/nationalBenchmarks.js';
 import { schoolIntelligenceRouter } from './routes/schoolIntelligence.js';
 import { schoolAiRouter } from './routes/schoolAi.js';
+import { googleOAuthRouter } from './routes/googleOAuth.js';
+import { initGoogleAuth } from './services/google/googleAuth.js';
 import { errorHandler } from './middleware/errorHandler.js';
 
 import { startReminderCron } from './services/lorReminderCron.js';
 import { startWorkflowCron } from './services/workflowCron.js';
 import { startMeetingReminderCron } from './services/meetingReminderCron.js';
+import { startMeetArtifactsCron } from './services/meetArtifactsCron.js';
 import { supabaseAdmin } from './config/supabase.js';
 
 const app = express();
@@ -152,6 +155,7 @@ app.use('/api/timeline-bookshelf', timelineBookshelfRouter);
 app.use('/api/national-benchmarks', nationalBenchmarksRouter);
 app.use('/api/school-intelligence', schoolIntelligenceRouter);
 app.use('/api/school-ai', schoolAiRouter);
+app.use('/api/google-oauth', googleOAuthRouter);
 
 // Health check
 app.get('/health', (req, res) => {
@@ -170,4 +174,6 @@ app.listen(PORT, () => {
   startWorkflowCron();
   // 15-minute meeting / webinar heads-up
   startMeetingReminderCron();
+  // Google Meet transcripts + Gemini notes → meeting summary / action items
+  void initGoogleAuth().then(() => startMeetArtifactsCron());
 });
