@@ -19,6 +19,8 @@ import {
   listSmartNotes,
   listTranscripts,
   docUrl,
+  unsupportedMeetFeatures,
+  setSpaceAccessType,
 } from '../src/services/google/meetClient.js';
 
 function argValues(flag: string): string[] {
@@ -38,6 +40,10 @@ async function create() {
   console.log('  name       :', space.name);
   console.log('  link       :', space.meetingUri);
   console.log('  config     :', JSON.stringify(space.config, null, 2));
+  const dropped = unsupportedMeetFeatures();
+  if (dropped.length) {
+    console.log(`  ⚠️  Not available on this Workspace plan (skipped): ${dropped.join(', ')}`);
+  }
 
   for (const email of cohosts) {
     try {
@@ -93,6 +99,11 @@ async function main() {
   const [cmd, arg] = process.argv.slice(2);
   if (cmd === 'create') return create();
   if (cmd === 'check' && arg) return check(arg);
+  if (cmd === 'open' && arg) {
+    const s = await setSpaceAccessType(arg, 'OPEN');
+    console.log(`✅ ${s.name} access is now ${String((s.config as any)?.accessType)} — anyone with the link can join`);
+    return;
+  }
   console.log('Usage:\n  meet:spike -- create --cohost a@gmail.com --guest b@gmail.com\n  meet:spike -- check spaces/XXXX');
 }
 

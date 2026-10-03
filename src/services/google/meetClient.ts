@@ -47,18 +47,76 @@ function autoArtifactsConfig() {
   };
 }
 
-export async function createSpace(): Promise<MeetSpace> {
-  return googleRequest<MeetSpace>(`${MEET}/spaces`, {
-    method: 'POST',
-    data: {
-      config: {
-        accessType: 'TRUSTED',
-        entryPointAccess: 'ALL',
-        attendanceReportGenerationType: 'GENERATE_REPORT',
-        artifactConfig: autoArtifactsConfig(),
-      },
-    },
+/** OPEN = anyone with the link joins without knocking; TRUSTED = org + invited members. */
+function meetAccessType(): 'OPEN' | 'TRUSTED' | 'RESTRICTED' {
+  const v = (process.env.GOOGLE_MEET_ACCESS_TYPE || 'TRUSTED').toUpperCase();
+  return v === 'OPEN' || v === 'RESTRICTED' ? v : 'TRUSTED';
+}
+
+export async function setSpaceAccessType(
+  spaceName: string,
+  accessType: 'OPEN' | 'TRUSTED' | 'RESTRICTED',
+): Promise<MeetSpace> {
+  return googleRequest<MeetSpace>(`${MEET}/${spaceName}`, {
+    method: 'PATCH',
+    params: { updateMask: 'config.accessType' },
+    data: { config: { accessType } },
   });
+}
+
+type OptionalFeature = 'attendance' | 'recording' | 'transcription' | 'smartNotes';
+
+function unavailableFeature(err: unknown): OptionalFeature | null {
+  if (!(err instanceof GoogleApiError) || err.status !== 403) return null;
+  const details = (err.details as any)?.error?.details || [];
+  const info = details.find((d: any) => d?.reason === 'FEATURE_UNAVAILABLE_TO_USER');
+  const name = String(info?.metadata?.feature_name || err.message).toLowerCase();
+  if (!info && !/not available to the user/i.test(err.message)) return null;
+  if (name.includes('attendance')) return 'attendance';
+  if (name.includes('record')) return 'recording';
+  if (name.includes('transcri')) return 'transcription';
+  if (name.includes('smartnote') || name.includes('notes') || name.includes('gemini')) return 'smartNotes';
+  return null;
+}
+
+/** Features the Workspace plan rejected; skipped on later creates. */
+const unsupportedFeatures = new Set<OptionalFeature>();
+
+export function unsupportedMeetFeatures(): OptionalFeature[] {
+  return Array.from(unsupportedFeatures);
+}
+
+function spaceConfig() {
+  const artifacts = autoArtifactsConfig() as Record<string, unknown>;
+  if (unsupportedFeatures.has('recording')) delete artifacts.recordingConfig;
+  if (unsupportedFeatures.has('transcription')) delete artifacts.transcriptionConfig;
+  if (unsupportedFeatures.has('smartNotes')) delete artifacts.smartNotesConfig;
+  return {
+    accessType: meetAccessType(),
+    entryPointAccess: 'ALL',
+    ...(unsupportedFeatures.has('attendance')
+      ? {}
+      : { attendanceReportGenerationType: 'GENERATE_REPORT' }),
+    ...(Object.keys(artifacts).length ? { artifactConfig: artifacts } : {}),
+  };
+}
+
+/** Creates a space, dropping any optional feature the Workspace plan does not allow. */
+export async function createSpace(): Promise<MeetSpace> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      return await googleRequest<MeetSpace>(`${MEET}/spaces`, {
+        method: 'POST',
+        data: { config: spaceConfig() },
+      });
+    } catch (err) {
+      const feature = unavailableFeature(err);
+      if (!feature || unsupportedFeatures.has(feature)) throw err;
+      console.warn(`Google Meet: "${feature}" not available on this Workspace plan; creating without it`);
+      unsupportedFeatures.add(feature);
+    }
+  }
+  throw new Error('Could not create Meet space with the available features');
 }
 
 export async function getSpace(spaceName: string): Promise<MeetSpace> {
