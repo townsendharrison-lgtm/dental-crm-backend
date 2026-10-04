@@ -2,6 +2,37 @@ import { Router, Response } from 'express';
 import { supabaseAdmin } from '../config/supabase.js';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth.js';
 
+function cleanOnboardingGuide(raw: unknown) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { enabled: false, title: 'Welcome — start here', intro: '', steps: [] };
+  }
+  const guide = raw as Record<string, unknown>;
+  const steps = Array.isArray(guide.steps)
+    ? guide.steps
+        .map((row: any, index: number) => {
+          const title = String(row?.title || '').trim();
+          const body = String(row?.body || '').trim();
+          if (!title && !body) return null;
+          const linkLabel = String(row?.linkLabel ?? row?.link_label ?? '').trim();
+          const linkHref = String(row?.linkHref ?? row?.link_href ?? '').trim();
+          return {
+            id: String(row?.id || `step-${index + 1}`).trim() || `step-${index + 1}`,
+            title: title || 'Step',
+            body,
+            linkLabel,
+            linkHref,
+          };
+        })
+        .filter(Boolean)
+    : [];
+  return {
+    enabled: guide.enabled !== false,
+    title: String(guide.title || '').trim() || 'Welcome — start here',
+    intro: String(guide.intro || '').trim(),
+    steps,
+  };
+}
+
 const router = Router();
 
 router.use(authenticate);
@@ -67,10 +98,15 @@ router.put('/', authorize('ADMIN'), async (req: AuthRequest, res: Response) => {
         .map((row: any, index: number) => {
           const label = String(row?.label || '').trim();
           if (!label) return null;
+          const rawItems = row?.recommendedActionItems ?? row?.recommended_action_items;
+          const recommendedActionItems = Array.isArray(rawItems)
+            ? rawItems.map((item: unknown) => String(item || '').trim()).filter(Boolean)
+            : [];
           return {
             id: String(row?.id || `type-${index + 1}`).trim() || `type-${index + 1}`,
             label,
             summaryTemplate: String(row?.summaryTemplate ?? row?.summary_template ?? '').trim(),
+            recommendedActionItems,
           };
         })
         .filter(Boolean);
@@ -96,6 +132,25 @@ router.put('/', authorize('ADMIN'), async (req: AuthRequest, res: Response) => {
       dbUpdates.timeline_card_colors = cleaned;
     }
 
+    let onboardingBlocked = false;
+    if (updates.studentOnboarding !== undefined || updates.mentorOnboarding !== undefined) {
+      const { error: probeErr } = await supabaseAdmin
+        .from('admin_settings')
+        .select('student_onboarding')
+        .eq('id', 1)
+        .maybeSingle();
+      if (probeErr) {
+        onboardingBlocked = true;
+      } else {
+        if (updates.studentOnboarding !== undefined) {
+          dbUpdates.student_onboarding = cleanOnboardingGuide(updates.studentOnboarding);
+        }
+        if (updates.mentorOnboarding !== undefined) {
+          dbUpdates.mentor_onboarding = cleanOnboardingGuide(updates.mentorOnboarding);
+        }
+      }
+    }
+
     const { data: updated, error } = await supabaseAdmin
       .from('admin_settings')
       .update(dbUpdates)
@@ -105,6 +160,14 @@ router.put('/', authorize('ADMIN'), async (req: AuthRequest, res: Response) => {
 
     if (error) {
       return res.status(400).json({ error: error.message });
+    }
+
+    if (onboardingBlocked) {
+      return res.json({
+        ...updated,
+        onboarding_warning:
+          'Onboarding was not saved. Run backend/migrations/063_onboarding.sql in Supabase, then save again.',
+      });
     }
 
     res.json(updated);

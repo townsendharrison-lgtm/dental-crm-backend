@@ -210,6 +210,7 @@ router.post('/signin', async (req: Request, res: Response) => {
         role,
         avatar: profile?.avatar,
         timezone: profile?.timezone || undefined,
+        onboardingCompletedAt: profile?.onboarding_completed_at || null,
       }
     });
   } catch (error) {
@@ -312,6 +313,7 @@ router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
       avatar: user.avatar,
       timezone: user.timezone || undefined,
       createdAt: user.created_at,
+      onboardingCompletedAt: user.onboarding_completed_at || null,
       weeklyLeadGoal: user.weekly_lead_goal,
       monthlyLeadGoal: user.monthly_lead_goal,
     });

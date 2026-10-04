@@ -21,6 +21,7 @@ import {
   docUrl,
   unsupportedMeetFeatures,
   setSpaceAccessType,
+  endActiveConference,
 } from '../src/services/google/meetClient.js';
 
 function argValues(flag: string): string[] {
@@ -99,6 +100,16 @@ async function main() {
   const [cmd, arg] = process.argv.slice(2);
   if (cmd === 'create') return create();
   if (cmd === 'check' && arg) return check(arg);
+  if (cmd === 'end' && arg) {
+    const s = await getSpace(arg);
+    if (!s.activeConference) {
+      console.log(`ℹ️  ${arg} has no live call (already ended).`);
+      return;
+    }
+    await endActiveConference(arg);
+    console.log(`✅ Live call in ${arg} ended for everyone.`);
+    return;
+  }
   if (cmd === 'open' && arg) {
     const s = await setSpaceAccessType(arg, 'OPEN');
     console.log(`✅ ${s.name} access is now ${String((s.config as any)?.accessType)} — anyone with the link can join`);

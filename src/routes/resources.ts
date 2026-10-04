@@ -42,9 +42,18 @@ router.post('/', authorize('ADMIN'), async (req: AuthRequest, res: Response) => 
       estimatedTime = '5m',
       category = 'General',
       icon = 'BookOpen',
-      sortOrder = 0,
       isActive = true,
     } = req.body;
+
+    let sortOrder = req.body.sortOrder ?? req.body.sort_order;
+    if (sortOrder === undefined || sortOrder === null || sortOrder === '') {
+      const { data: lastRows } = await supabaseAdmin
+        .from('resources')
+        .select('sort_order')
+        .order('sort_order', { ascending: false })
+        .limit(1);
+      sortOrder = (lastRows?.[0]?.sort_order ?? -1) + 1;
+    }
 
     if (!title || !url) {
       return res.status(400).json({ error: 'Title and URL are required' });
@@ -58,7 +67,7 @@ router.post('/', authorize('ADMIN'), async (req: AuthRequest, res: Response) => 
         estimated_time: estimatedTime,
         category,
         icon,
-        sort_order: sortOrder,
+        sort_order: Number(sortOrder) || 0,
         is_active: isActive,
       })
       .select()
@@ -71,6 +80,41 @@ router.post('/', authorize('ADMIN'), async (req: AuthRequest, res: Response) => 
     res.status(201).json(resource);
   } catch (error: any) {
     console.error('Create resource error:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// ─── PUT /api/resources/reorder/bulk ────────────────────────────────
+router.put('/reorder/bulk', authorize('ADMIN'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { orderedIds } = req.body as { orderedIds?: string[] };
+    if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+      return res.status(400).json({ error: 'orderedIds array is required' });
+    }
+
+    const uniqueIds = orderedIds.filter((id, index) => typeof id === 'string' && orderedIds.indexOf(id) === index);
+    await Promise.all(
+      uniqueIds.map((id, index) =>
+        supabaseAdmin
+          .from('resources')
+          .update({ sort_order: index, updated_at: new Date().toISOString() })
+          .eq('id', id),
+      ),
+    );
+
+    const { data, error } = await supabaseAdmin
+      .from('resources')
+      .select('*')
+      .order('sort_order', { ascending: true })
+      .order('title', { ascending: true });
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    res.json({ resources: data || [] });
+  } catch (error: any) {
+    console.error('Reorder resources error:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });

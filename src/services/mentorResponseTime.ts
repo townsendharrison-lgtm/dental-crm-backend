@@ -1,9 +1,102 @@
 import { supabaseAdmin } from '../config/supabase.js';
 
+const CLOSER_EXACT = new Set([
+  'ok',
+  'okay',
+  'k',
+  'kk',
+  'thanks',
+  'thank you',
+  'thankyou',
+  'ty',
+  'thx',
+  'got it',
+  'gotcha',
+  'sounds good',
+  'sounds great',
+  'perfect',
+  'great',
+  'awesome',
+  'cool',
+  'nice',
+  'noted',
+  'understood',
+  'will do',
+  'on it',
+  'appreciate it',
+  'appreciated',
+  'no problem',
+  'no worries',
+  'np',
+  'you too',
+  'yes',
+  'yep',
+  'yeah',
+  'yup',
+  'no',
+  'nope',
+  'good',
+  'makes sense',
+  'that works',
+  'works for me',
+  'see you',
+  'see you then',
+  'talk soon',
+  'talk then',
+  'bye',
+  'goodbye',
+  'have a good one',
+  'thanks so much',
+  'thank you so much',
+  'ok thanks',
+  'okay thanks',
+  'ok thank you',
+  'thanks again',
+  'great thanks',
+  'perfect thanks',
+  'sounds good thanks',
+  'got it thanks',
+  'will do thanks',
+]);
+
+const REQUEST_PATTERN =
+  /\b(can you|could you|would you|will you|please|let me know|lmk|i need|help me|when can|how do i|how should|what should|wondering|take a look|review this|thoughts on|question)\b/i;
+
+function normalizeChatText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[!.,]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 /**
- * Average hours for a mentor to reply after a student messages them in a 1:1 DM.
- * Uses the latest student message before each mentor reply.
- * Auto-reply template messages are excluded (they do not count as mentor replies).
+ * A student message starts the mentor's reply clock only when it asks for a response.
+ * Short closers ("thanks", "sounds good") after the mentor already answered do not.
+ */
+export function studentMessageNeedsReply(text: string | null | undefined): boolean {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  const normalized = normalizeChatText(raw);
+  if (!normalized || CLOSER_EXACT.has(normalized)) return false;
+  if (
+    !raw.includes('?') &&
+    /^(thanks|thank you|ok|okay|got it|sounds good|perfect|great|awesome|cool|noted|will do)\b/.test(
+      normalized,
+    ) &&
+    normalized.length < 80
+  ) {
+    return false;
+  }
+  if (raw.includes('?')) return true;
+  return REQUEST_PATTERN.test(raw);
+}
+
+/**
+ * Average hours for this mentor to reply after one of their students asks for a response
+ * in a 1:1 DM. Chats with admins, mentor managers, and other staff are ignored.
+ * Auto-replies are ignored. A student closer ("thanks") does not start a new wait,
+ * and an unanswered closer at the end of the thread is not counted.
  */
 export async function recalculateMentorResponseTime(mentorId: string): Promise<number> {
   try {
@@ -54,7 +147,9 @@ export async function recalculateMentorResponseTime(mentorId: string): Promise<n
       .in('id', otherIds);
 
     const studentIds = new Set(
-      (otherUsers || []).filter((u) => u.role === 'STUDENT').map((u) => u.id as string),
+      (otherUsers || [])
+        .filter((u) => String(u.role || '').trim().toUpperCase() === 'STUDENT')
+        .map((u) => u.id as string),
     );
 
     const studentConvs = relevant.filter((conv) => {
@@ -75,7 +170,7 @@ export async function recalculateMentorResponseTime(mentorId: string): Promise<n
         .eq('conversation_id', conv.id)
         .order('created_at', { ascending: true });
 
-      let lastStudentAtMs: number | null = null;
+      let pendingQuestionAtMs: number | null = null;
 
       for (const msg of messages || []) {
         const senderId = msg.sender_id as string;
@@ -84,20 +179,22 @@ export async function recalculateMentorResponseTime(mentorId: string): Promise<n
         const isAutoReply =
           Boolean(autoReplyText) && isMentor && msg.text === autoReplyText;
 
-        if (isAutoReply) continue;
+        if (isAutoReply || (!isMentor && !isStudent)) continue;
 
         if (isStudent) {
-          lastStudentAtMs = new Date(msg.created_at).getTime();
+          if (studentMessageNeedsReply(msg.text) && pendingQuestionAtMs == null) {
+            pendingQuestionAtMs = new Date(msg.created_at).getTime();
+          }
           continue;
         }
 
-        if (isMentor && lastStudentAtMs != null) {
+        if (isMentor && pendingQuestionAtMs != null) {
           const hours =
-            (new Date(msg.created_at).getTime() - lastStudentAtMs) / (1000 * 60 * 60);
+            (new Date(msg.created_at).getTime() - pendingQuestionAtMs) / (1000 * 60 * 60);
           if (Number.isFinite(hours) && hours >= 0) {
             latenciesHours.push(hours);
           }
-          lastStudentAtMs = null;
+          pendingQuestionAtMs = null;
         }
       }
     }

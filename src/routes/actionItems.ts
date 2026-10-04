@@ -252,7 +252,9 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
       if (updates.description !== undefined) dbUpdates.description = updates.description;
       if (updates.category !== undefined) dbUpdates.category = updates.category;
       if (updates.resource_id !== undefined) dbUpdates.resource_id = updates.resource_id;
+      if (updates.resourceId !== undefined) dbUpdates.resource_id = updates.resourceId || null;
       if (updates.resource_link !== undefined) dbUpdates.resource_link = updates.resource_link;
+      if (updates.resourceLink !== undefined) dbUpdates.resource_link = updates.resourceLink || null;
     }
 
     const { data: updatedItem, error } = await supabaseAdmin
