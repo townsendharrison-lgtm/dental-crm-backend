@@ -17,6 +17,7 @@ import {
   type MeetArtifact,
 } from './meetClient.js';
 import { parseMeetingNotes } from './meetingNotesAi.js';
+import { sendMeetingGuestEmail, type MeetingInviteKind } from './meetingInviteEmail.js';
 
 const AUTO_MEET_AUDIENCES = new Set(['STUDENT', 'ADMIN_DIRECT', 'STAFF']);
 const ARTIFACT_WAIT_MS = 6 * 60 * 60 * 1000;
@@ -46,6 +47,7 @@ export interface MeetingRecord {
 
 interface Participant {
   email: string;
+  name: string;
   cohost: boolean;
 }
 
@@ -69,21 +71,55 @@ async function loadParticipants(meeting: MeetingRecord): Promise<Participant[]> 
     new Set([meeting.mentor_id, meeting.student_id, ...(meeting.attendees || [])].filter(Boolean)),
   ) as string[];
   if (!ids.length) return [];
-  const { data: users } = await supabaseAdmin.from('users').select('id, email').in('id', ids);
-  const emailById = new Map((users || []).map((u: any) => [u.id, (u.email || '').trim().toLowerCase()]));
+  const { data: users } = await supabaseAdmin.from('users').select('id, email, name').in('id', ids);
+  const byId = new Map(
+    (users || []).map((u: any) => [
+      u.id,
+      { email: (u.email || '').trim().toLowerCase(), name: String(u.name || '').trim() },
+    ]),
+  );
   const owner = dsgUserEmail().toLowerCase();
 
   const out = new Map<string, Participant>();
   const push = (id: string | null | undefined, cohost: boolean) => {
-    const email = id ? emailById.get(id) : null;
-    if (!email || email === owner) return;
-    const prev = out.get(email);
-    out.set(email, { email, cohost: cohost || !!prev?.cohost });
+    const user = id ? byId.get(id) : null;
+    if (!user?.email || user.email === owner) return;
+    const prev = out.get(user.email);
+    out.set(user.email, {
+      email: user.email,
+      name: user.name || prev?.name || '',
+      cohost: cohost || !!prev?.cohost,
+    });
   };
   push(meeting.mentor_id, true);
   for (const a of meeting.attendees || []) push(a, true);
   push(meeting.student_id, false);
   return Array.from(out.values());
+}
+
+async function emailGuests(
+  kind: MeetingInviteKind,
+  meeting: MeetingRecord,
+  meetingUri: string,
+  participants: Participant[],
+): Promise<void> {
+  const start = new Date(meeting.date);
+  if (Number.isNaN(start.getTime())) return;
+  const end = new Date(start.getTime() + (meeting.duration || 30) * 60_000);
+  try {
+    await sendMeetingGuestEmail({
+      kind,
+      meetingId: meeting.id,
+      title: meeting.title || 'Meeting',
+      start,
+      end,
+      timeZone: meeting.timezone,
+      meetingUri,
+      guests: participants.map((p) => ({ email: p.email, name: p.name || undefined })),
+    });
+  } catch (err) {
+    console.error(`Meeting guest email failed for ${meeting.id}:`, err);
+  }
 }
 
 function calendarInput(meeting: MeetingRecord, meetingUri: string, participants: Participant[]) {
@@ -153,11 +189,13 @@ export async function provisionMeetingGoogle(meetingId: string): Promise<void> {
 
     let eventId = meeting.google_calendar_event_id || null;
     const input = calendarInput(meeting, meetingUri, participants);
+    const inviteKind: MeetingInviteKind = eventId ? 'update' : 'invite';
     if (eventId) {
       await updateCalendarEvent(eventId, input);
     } else {
       eventId = (await createCalendarEvent(input)).id;
     }
+    await emailGuests(inviteKind, meeting, meetingUri, participants);
 
     await supabaseAdmin
       .from('meetings')
@@ -232,6 +270,7 @@ export async function syncMeetingGoogleOnUpdate(
       const { id } = await createCalendarEvent(input);
       await supabaseAdmin.from('meetings').update({ google_calendar_event_id: id }).eq('id', after.id);
     }
+    await emailGuests('update', after, meetingUri, participants);
     await supabaseAdmin
       .from('meetings')
       .update({ meet_error: memberErrors.length ? `Member warnings: ${memberErrors.join(' | ')}` : null })
@@ -246,6 +285,11 @@ export async function syncMeetingGoogleOnUpdate(
 export async function cancelMeetingGoogle(meeting: MeetingRecord): Promise<void> {
   if (!googleMeetEnabled()) return;
   try {
+    const meetingUri = meeting.link?.trim() || '';
+    if (meetingUri) {
+      const participants = await loadParticipants(meeting);
+      await emailGuests('cancel', meeting, meetingUri, participants);
+    }
     if (meeting.google_calendar_event_id) {
       await deleteCalendarEvent(meeting.google_calendar_event_id);
     }

@@ -216,14 +216,21 @@ function calendarBody(input: CalendarEventInput) {
     attendees: input.attendeeEmails.map((email) => ({ email })),
     guestsCanModify: false,
     guestsCanInviteOthers: false,
-    source: { title: 'Google Meet', url: input.meetingUri },
+    source: { title: 'Dental School Guide', url: input.meetingUri },
   };
 }
+
+/**
+ * Google's own invitation mail is labeled "Unknown sender" for people who have
+ * never emailed info@dentalschoolguide.com. We keep the event on the DSG calendar
+ * and send the guest email ourselves, from Dental School Guide.
+ */
+const CALENDAR_SEND = { sendUpdates: 'none' as const };
 
 export async function createCalendarEvent(input: CalendarEventInput): Promise<{ id: string }> {
   return googleRequest<{ id: string }>(CALENDAR_EVENTS, {
     method: 'POST',
-    params: { sendUpdates: 'all' },
+    params: CALENDAR_SEND,
     data: calendarBody(input),
   });
 }
@@ -234,7 +241,7 @@ export async function updateCalendarEvent(
 ): Promise<void> {
   await googleRequest(`${CALENDAR_EVENTS}/${encodeURIComponent(eventId)}`, {
     method: 'PATCH',
-    params: { sendUpdates: 'all' },
+    params: CALENDAR_SEND,
     data: calendarBody(input),
   });
 }
@@ -243,7 +250,7 @@ export async function deleteCalendarEvent(eventId: string): Promise<void> {
   try {
     await googleRequest(`${CALENDAR_EVENTS}/${encodeURIComponent(eventId)}`, {
       method: 'DELETE',
-      params: { sendUpdates: 'all' },
+      params: CALENDAR_SEND,
     });
   } catch (err) {
     if (err instanceof GoogleApiError && (err.status === 404 || err.status === 410)) return;
