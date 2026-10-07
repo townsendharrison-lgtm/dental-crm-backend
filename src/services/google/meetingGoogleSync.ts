@@ -7,12 +7,15 @@ import {
   deleteCalendarEvent,
   deleteMember,
   docUrl,
+  enableCohostArtifacts,
   endActiveConference,
   exportDocText,
   listConferenceRecords,
+  listDriveDocs,
   listMembers,
   listSmartNotes,
   listTranscripts,
+  type DriveDocFile,
   updateCalendarEvent,
   type MeetArtifact,
 } from './meetClient.js';
@@ -37,11 +40,14 @@ export interface MeetingRecord {
   attendees?: string[] | null;
   link?: string | null;
   summary?: string | null;
+  notes?: string | null;
   google_space_name?: string | null;
   google_meeting_code?: string | null;
   google_calendar_event_id?: string | null;
   meet_status?: string | null;
   meet_error?: string | null;
+  notes_doc_url?: string | null;
+  transcript_doc_url?: string | null;
   artifacts_synced_at?: string | null;
 }
 
@@ -130,8 +136,8 @@ function calendarInput(meeting: MeetingRecord, meetingUri: string, participants:
     title: meeting.title,
     description:
       `Join Google Meet: ${meetingUri}\n\n` +
-      'This session is hosted by Dental School Guide. It is automatically transcribed and ' +
-      'summarized with Gemini notes for your mentoring record.',
+      'Join with the Google account this invitation was sent to. ' +
+      'Transcription and Gemini notes start when the mentor joins. An admin does not need to be in the call.',
     startIso: start.toISOString(),
     endIso: end.toISOString(),
     timeZone: tz,
@@ -184,6 +190,7 @@ export async function provisionMeetingGoogle(meetingId: string): Promise<void> {
     }
     if (!meetingUri) throw new Error('Meet space has no meetingUri');
 
+    await enableCohostArtifacts(spaceName);
     const participants = await loadParticipants(meeting);
     const memberErrors = await addMembers(spaceName, participants);
 
@@ -250,6 +257,7 @@ export async function syncMeetingGoogleOnUpdate(
 
     const participants = await loadParticipants(after);
     const memberErrors: string[] = [];
+    await enableCohostArtifacts(after.google_space_name).catch((e) => memberErrors.push(errText(e)));
     if (people) {
       const wanted = new Map(participants.map((p) => [p.email, p]));
       const existing = await listMembers(after.google_space_name);
@@ -314,6 +322,85 @@ async function readDocs(artifacts: MeetArtifact[]): Promise<string> {
   return parts.join('\n\n').trim();
 }
 
+const NOTES_MARK = '--- Google Meet notes ---';
+const MAX_NOTES_CHARS = 30_000;
+const TITLE_STOP = new Set(['meeting', 'session', 'call', 'with', 'from', 'this', 'that', 'your']);
+
+function driveQuote(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+function titleWords(title: string): string[] {
+  const words = title
+    .split(/[^A-Za-z0-9]+/)
+    .map((w) => w.trim())
+    .filter((w) => w.length >= 4 && !TITLE_STOP.has(w.toLowerCase()));
+  return Array.from(new Set(words)).slice(0, 4);
+}
+
+function docKind(name: string): 'notes' | 'transcript' | 'other' {
+  const n = name.toLowerCase();
+  if (n.includes('transcript')) return 'transcript';
+  if (n.includes('note') || n.includes('gemini')) return 'notes';
+  return 'other';
+}
+
+/** Gemini notes and transcripts Google saved in Drive, matched to this meeting. */
+async function findDriveDocs(
+  meeting: MeetingRecord,
+  windowStart: number,
+  windowEnd: number,
+): Promise<{ notes: DriveDocFile | null; transcript: DriveDocFile | null }> {
+  const after = new Date(windowStart - 2 * 60 * 60 * 1000).toISOString();
+  const before = new Date(windowEnd + 48 * 60 * 60 * 1000).toISOString();
+  const time = `modifiedTime > '${after}' and modifiedTime < '${before}'`;
+  const base = `mimeType = 'application/vnd.google-apps.document' and trashed = false and ${time}`;
+  const code = (meeting.google_meeting_code || '').trim();
+  const words = titleWords(meeting.title || '');
+
+  const queries: string[] = [];
+  if (code) queries.push(`${base} and fullText contains '${driveQuote(code)}'`);
+  if (words.length) {
+    const nameFilter = words.map((w) => `name contains '${driveQuote(w)}'`).join(' and ');
+    queries.push(`${base} and ${nameFilter}`);
+  }
+  if (!queries.length) return { notes: null, transcript: null };
+
+  const byId = new Map<string, DriveDocFile>();
+  for (const q of queries) {
+    const files = await listDriveDocs(q);
+    for (const file of files) byId.set(file.id, file);
+  }
+
+  const title = (meeting.title || '').toLowerCase();
+  const ranked = Array.from(byId.values())
+    .map((file) => {
+      const name = file.name.toLowerCase();
+      let score = 0;
+      if (code && name.includes(code.toLowerCase())) score += 10;
+      if (words.length && words.every((w) => name.includes(w.toLowerCase()))) score += 8;
+      else if (title.length >= 8 && name.includes(title)) score += 8;
+      const kind = docKind(file.name);
+      if (kind !== 'other') score += 2;
+      return { file, score, kind };
+    })
+    .filter((row) => row.score >= 8 && row.kind !== 'other')
+    .sort((a, b) => b.score - a.score || (b.file.modifiedTime || '').localeCompare(a.file.modifiedTime || ''));
+
+  return {
+    notes: ranked.find((row) => row.kind === 'notes')?.file || null,
+    transcript: ranked.find((row) => row.kind === 'transcript')?.file || null,
+  };
+}
+
+function mergeMeetingNotes(existing: string | null | undefined, text: string, docLink: string | null): string {
+  const body = text.trim().slice(0, MAX_NOTES_CHARS);
+  const block = [NOTES_MARK, docLink ? `Document: ${docLink}` : '', body].filter(Boolean).join('\n');
+  const prior = (existing || '').trim();
+  if (!prior || prior.includes(NOTES_MARK)) return prior.includes(NOTES_MARK) ? prior : block;
+  return `${prior}\n\n${block}`;
+}
+
 export type ArtifactSyncResult =
   | 'not_started'
   | 'in_progress'
@@ -322,21 +409,38 @@ export type ArtifactSyncResult =
   | 'no_artifacts'
   | 'skipped';
 
+const DRIVE_RETRY_MS = 14 * 24 * 60 * 60 * 1000;
+
+function docLink(file: DriveDocFile | null): string | null {
+  if (!file) return null;
+  return file.webViewLink || `https://docs.google.com/document/d/${file.id}/edit`;
+}
+
 /**
- * Pull transcripts + Gemini notes for one meeting, write summary + action items.
- * Idempotent: claims the meeting via artifacts_synced_at before writing action items.
+ * Pull Gemini notes into the meeting's notes field (the manual Meeting notes box).
+ * Meet's own file list is checked first. If that is empty, the organizer's Drive is searched.
  */
 export async function syncMeetingArtifacts(
   meeting: MeetingRecord,
   { force = false }: { force?: boolean } = {},
 ): Promise<ArtifactSyncResult> {
-  if (!meeting.google_space_name || meeting.artifacts_synced_at) return 'skipped';
+  const driveRetry =
+    !!meeting.artifacts_synced_at &&
+    meeting.meet_status === 'no_artifacts' &&
+    !meeting.notes_doc_url &&
+    !meeting.transcript_doc_url;
+  if (!meeting.google_space_name) return 'skipped';
+  if (meeting.artifacts_synced_at && !driveRetry) return 'skipped';
+
   const now = Date.now();
-  const scheduledEnd = new Date(meeting.date).getTime() + (meeting.duration || 30) * 60_000;
+  const scheduledStart = new Date(meeting.date).getTime();
+  const scheduledEnd = scheduledStart + (meeting.duration || 30) * 60_000;
 
   const records = await listConferenceRecords(meeting.google_space_name);
   if (!records.length) {
     if (!force && now - scheduledEnd > NO_CONFERENCE_GIVE_UP_MS) {
+      const saved = await saveDriveNotes(meeting, null, scheduledStart, scheduledEnd);
+      if (saved) return 'notes_ready';
       await supabaseAdmin
         .from('meetings')
         .update({ meet_status: 'no_artifacts', artifacts_synced_at: new Date().toISOString() })
@@ -349,6 +453,9 @@ export async function syncMeetingArtifacts(
   if (records.some((r) => !r.endTime)) return 'in_progress';
 
   const lastEnd = Math.max(...records.map((r) => new Date(r.endTime!).getTime()));
+  const firstStart = Math.min(
+    ...records.map((r) => new Date(r.startTime || meeting.date).getTime()),
+  );
   const transcripts: MeetArtifact[] = [];
   const notes: MeetArtifact[] = [];
   for (const r of records) {
@@ -361,9 +468,18 @@ export async function syncMeetingArtifacts(
   const pending = [...transcripts, ...notes].some((a) => a.state !== 'FILE_GENERATED');
   const readyNotes = notes.filter((a) => a.state === 'FILE_GENERATED');
   const readyTranscripts = transcripts.filter((a) => a.state === 'FILE_GENERATED');
+  const fromDrive =
+    readyNotes.length || readyTranscripts.length
+      ? { notes: null, transcript: null }
+      : await findDriveDocs(meeting, firstStart, lastEnd);
+  const hasFiles =
+    readyNotes.length > 0 ||
+    readyTranscripts.length > 0 ||
+    !!fromDrive.notes ||
+    !!fromDrive.transcript;
   const timedOut = now - lastEnd > ARTIFACT_WAIT_MS;
 
-  if ((pending || (!readyNotes.length && !readyTranscripts.length)) && !timedOut && !force) {
+  if ((pending || !hasFiles) && !timedOut && !force && !driveRetry) {
     await supabaseAdmin
       .from('meetings')
       .update({ meet_status: 'ended', conference_record_name: records[records.length - 1].name })
@@ -372,35 +488,44 @@ export async function syncMeetingArtifacts(
     return 'waiting_for_files';
   }
 
-  const hasFiles = readyNotes.length > 0 || readyTranscripts.length > 0;
-  const { data: claimed } = await supabaseAdmin
-    .from('meetings')
-    .update({
-      meet_status: hasFiles ? 'notes_ready' : 'no_artifacts',
-      conference_record_name: records[records.length - 1].name,
-      notes_doc_url: docUrl(readyNotes[readyNotes.length - 1]?.docsDestination),
-      transcript_doc_url: docUrl(readyTranscripts[readyTranscripts.length - 1]?.docsDestination),
-      artifacts_synced_at: new Date().toISOString(),
-    })
-    .eq('id', meeting.id)
-    .is('artifacts_synced_at', null)
-    .select('*')
-    .maybeSingle();
+  const notesDoc =
+    docUrl(readyNotes[readyNotes.length - 1]?.docsDestination) || docLink(fromDrive.notes);
+  const transcriptDoc =
+    docUrl(readyTranscripts[readyTranscripts.length - 1]?.docsDestination) ||
+    docLink(fromDrive.transcript);
+  const patch = {
+    meet_status: hasFiles ? 'notes_ready' : 'no_artifacts',
+    conference_record_name: records[records.length - 1].name,
+    notes_doc_url: notesDoc,
+    transcript_doc_url: transcriptDoc,
+    artifacts_synced_at: new Date().toISOString(),
+  };
+  let claim = supabaseAdmin.from('meetings').update(patch).eq('id', meeting.id);
+  claim = meeting.artifacts_synced_at ? claim.is('notes_doc_url', null) : claim.is('artifacts_synced_at', null);
+  const { data: claimed } = await claim.select('*').maybeSingle();
   if (!claimed || !hasFiles) return hasFiles ? 'skipped' : 'no_artifacts';
 
   try {
-    const source = readyNotes.length ? 'smart_notes' : 'transcript';
-    const text = await readDocs(readyNotes.length ? readyNotes : readyTranscripts);
-    const parsed = await parseMeetingNotes(text, source);
-
-    if (parsed.summary) {
-      const prior = (claimed.summary || '').trim();
-      const summary = prior
-        ? `${prior}\n\n--- Gemini meeting notes ---\n${parsed.summary}`
-        : parsed.summary;
-      await supabaseAdmin.from('meetings').update({ summary }).eq('id', meeting.id);
+    const source = readyNotes.length || fromDrive.notes ? 'smart_notes' : 'transcript';
+    const text = readyNotes.length
+      ? await readDocs(readyNotes)
+      : fromDrive.notes
+        ? await exportDocText(fromDrive.notes.id)
+        : readyTranscripts.length
+          ? await readDocs(readyTranscripts)
+          : fromDrive.transcript
+            ? await exportDocText(fromDrive.transcript.id)
+            : '';
+    if (text.trim()) {
+      await supabaseAdmin
+        .from('meetings')
+        .update({
+          notes: mergeMeetingNotes(claimed.notes, text, notesDoc || transcriptDoc),
+        })
+        .eq('id', meeting.id);
     }
 
+    const parsed = await parseMeetingNotes(text, source);
     if (claimed.student_id && parsed.actionItems.length) {
       const rows = parsed.actionItems.map((item) => ({
         student_id: claimed.student_id,
@@ -422,10 +547,58 @@ export async function syncMeetingArtifacts(
   return 'notes_ready';
 }
 
+/** Used when Meet has no conference record but Drive may still have the doc. */
+async function saveDriveNotes(
+  meeting: MeetingRecord,
+  conferenceName: string | null,
+  windowStart: number,
+  windowEnd: number,
+): Promise<boolean> {
+  const found = await findDriveDocs(meeting, windowStart, windowEnd);
+  if (!found.notes && !found.transcript) return false;
+  const file = found.notes || found.transcript;
+  const link = docLink(file);
+  const text = file ? await exportDocText(file.id) : '';
+  const { data: claimed } = await supabaseAdmin
+    .from('meetings')
+    .update({
+      meet_status: 'notes_ready',
+      conference_record_name: conferenceName,
+      notes_doc_url: found.notes ? link : null,
+      transcript_doc_url: found.transcript ? docLink(found.transcript) : null,
+      notes: mergeMeetingNotes(meeting.notes, text, link),
+      artifacts_synced_at: new Date().toISOString(),
+    })
+    .eq('id', meeting.id)
+    .is('artifacts_synced_at', null)
+    .select('id')
+    .maybeSingle();
+  return !!claimed;
+}
+
+async function enableCohostNotes(meetings: { id: string; google_space_name?: string | null }[]): Promise<void> {
+  for (const m of meetings) {
+    if (!m.google_space_name) continue;
+    await enableCohostArtifacts(m.google_space_name).catch((err) =>
+      console.error(`Meet co-host notes setup failed for meeting ${m.id}:`, err),
+    );
+  }
+}
+
 /** Cron entry: sync every finished Meet meeting from the last few days. */
 export async function syncRecentMeetingArtifacts(): Promise<void> {
   if (!googleMeetEnabled()) return;
   const now = Date.now();
+
+  const { data: upcoming } = await supabaseAdmin
+    .from('meetings')
+    .select('id, google_space_name')
+    .not('google_space_name', 'is', null)
+    .eq('meet_status', 'provisioned')
+    .gte('date', new Date(now).toISOString())
+    .limit(50);
+  await enableCohostNotes(upcoming || []);
+
   const { data: meetings, error } = await supabaseAdmin
     .from('meetings')
     .select('*')
@@ -440,8 +613,23 @@ export async function syncRecentMeetingArtifacts(): Promise<void> {
     return;
   }
 
+  const { data: missed } = await supabaseAdmin
+    .from('meetings')
+    .select('*')
+    .not('google_space_name', 'is', null)
+    .eq('meet_status', 'no_artifacts')
+    .is('notes_doc_url', null)
+    .is('transcript_doc_url', null)
+    .gt('date', new Date(now - DRIVE_RETRY_MS).toISOString())
+    .limit(50);
+
   let ready = 0;
-  for (const m of (meetings || []) as MeetingRecord[]) {
+  for (const m of [...((meetings || []) as MeetingRecord[]), ...((missed || []) as MeetingRecord[])]) {
+    if (m.google_space_name) {
+      await enableCohostArtifacts(m.google_space_name).catch((err) =>
+        console.error(`Meet co-host notes setup failed for meeting ${m.id}:`, err),
+      );
+    }
     const end = new Date(m.date).getTime() + (m.duration || 30) * 60_000;
     if (end > now) continue;
     try {

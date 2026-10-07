@@ -94,9 +94,19 @@ function spaceConfig() {
   return {
     accessType: meetAccessType(),
     entryPointAccess: 'ALL',
+    // Google starts transcripts and Gemini notes only when a host or co-host
+    // joins. Co-host is ignored unless host management (moderation) is on, so
+    // without this the admin account has to be in the call.
+    moderation: 'ON' as const,
+    moderationRestrictions: {
+      chatRestriction: 'NO_RESTRICTION',
+      reactionRestriction: 'NO_RESTRICTION',
+      presentRestriction: 'NO_RESTRICTION',
+      defaultJoinAsViewerType: 'OFF',
+    },
     ...(unsupportedFeatures.has('attendance')
       ? {}
-      : { attendanceReportGenerationType: 'GENERATE_REPORT' }),
+      : { attendanceReportGenerationType: 'GENERATE_REPORT' as const }),
     ...(Object.keys(artifacts).length ? { artifactConfig: artifacts } : {}),
   };
 }
@@ -121,6 +131,19 @@ export async function createSpace(): Promise<MeetSpace> {
 
 export async function getSpace(spaceName: string): Promise<MeetSpace> {
   return googleRequest<MeetSpace>(`${MEET}/${spaceName}`);
+}
+
+/** Turn on host management and auto notes so a mentor co-host can start them. */
+export async function enableCohostArtifacts(spaceName: string): Promise<void> {
+  const config = spaceConfig();
+  const mask = ['config.moderation', 'config.moderationRestrictions'];
+  if ('artifactConfig' in config) mask.push('config.artifactConfig');
+  if ('attendanceReportGenerationType' in config) mask.push('config.attendanceReportGenerationType');
+  await googleRequest(`${MEET}/${spaceName}`, {
+    method: 'PATCH',
+    params: { updateMask: mask.join(',') },
+    data: { config },
+  });
 }
 
 export async function endActiveConference(spaceName: string): Promise<void> {
@@ -193,6 +216,28 @@ export async function exportDocText(documentId: string): Promise<string> {
     params: { mimeType: 'text/plain' },
     responseType: 'text',
   });
+}
+
+export interface DriveDocFile {
+  id: string;
+  name: string;
+  createdTime?: string;
+  modifiedTime?: string;
+  webViewLink?: string;
+}
+
+/** Docs in the connected account's Drive. `q` is a Drive files.list query. */
+export async function listDriveDocs(query: string): Promise<DriveDocFile[]> {
+  const res = await googleRequest<{ files?: DriveDocFile[] }>(DRIVE_FILES, {
+    params: {
+      q: query,
+      pageSize: 25,
+      orderBy: 'modifiedTime desc',
+      fields: 'files(id,name,createdTime,modifiedTime,webViewLink)',
+      spaces: 'drive',
+    },
+  });
+  return res.files || [];
 }
 
 export interface CalendarEventInput {
