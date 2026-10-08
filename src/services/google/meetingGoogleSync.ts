@@ -190,9 +190,14 @@ export async function provisionMeetingGoogle(meetingId: string): Promise<void> {
     }
     if (!meetingUri) throw new Error('Meet space has no meetingUri');
 
-    await enableCohostArtifacts(spaceName);
+    const memberErrors: string[] = [];
+    try {
+      await enableCohostArtifacts(spaceName);
+    } catch (err) {
+      memberErrors.push(`Notes setup: ${errText(err)}`);
+    }
     const participants = await loadParticipants(meeting);
-    const memberErrors = await addMembers(spaceName, participants);
+    memberErrors.push(...(await addMembers(spaceName, participants)));
 
     let eventId = meeting.google_calendar_event_id || null;
     const input = calendarInput(meeting, meetingUri, participants);

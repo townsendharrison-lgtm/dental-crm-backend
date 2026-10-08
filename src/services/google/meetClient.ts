@@ -136,9 +136,23 @@ export async function getSpace(spaceName: string): Promise<MeetSpace> {
 /** Turn on host management and auto notes so a mentor co-host can start them. */
 export async function enableCohostArtifacts(spaceName: string): Promise<void> {
   const config = spaceConfig();
-  const mask = ['config.moderation', 'config.moderationRestrictions'];
-  if ('artifactConfig' in config) mask.push('config.artifactConfig');
-  if ('attendanceReportGenerationType' in config) mask.push('config.attendanceReportGenerationType');
+  // Google rejects parent paths like config.artifactConfig. Only leaf fields are valid.
+  const mask = [
+    'config.moderation',
+    'config.moderationRestrictions.chatRestriction',
+    'config.moderationRestrictions.reactionRestriction',
+    'config.moderationRestrictions.presentRestriction',
+    'config.moderationRestrictions.defaultJoinAsViewerType',
+  ];
+  const artifacts = 'artifactConfig' in config ? config.artifactConfig : undefined;
+  if (artifacts && typeof artifacts === 'object') {
+    const fields = artifacts as Record<string, unknown>;
+    if (fields.recordingConfig) mask.push('config.artifactConfig.recordingConfig.autoRecordingGeneration');
+    if (fields.transcriptionConfig) {
+      mask.push('config.artifactConfig.transcriptionConfig.autoTranscriptionGeneration');
+    }
+    if (fields.smartNotesConfig) mask.push('config.artifactConfig.smartNotesConfig.autoSmartNotesGeneration');
+  }
   await googleRequest(`${MEET}/${spaceName}`, {
     method: 'PATCH',
     params: { updateMask: mask.join(',') },
