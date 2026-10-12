@@ -145,6 +145,8 @@ async function sendPushToUsers(
     body: string;
     meetingId: string;
     kind: string;
+    /** Overrides the default schedule deep link. */
+    linkPath?: string;
   },
 ) {
   if (!messaging || userIds.length === 0) return;
@@ -173,7 +175,7 @@ async function sendPushToUsers(
     if (!tokens || tokens.length === 0) continue;
 
     const tokenStrings = tokens.map((t: { token: string }) => t.token);
-    const path = schedulePathForRole(role, payload.meetingId);
+    const path = payload.linkPath || schedulePathForRole(role, payload.meetingId);
     const link = `${frontendUrl}${path}`;
 
     try {
@@ -357,6 +359,186 @@ export async function notifyMentorOfJoin(options: {
   } catch (err) {
     console.error('notifyMentorOfJoin error:', err);
   }
+}
+
+export const MEETING_NOTES_READY_CATEGORY = 'MEETING_NOTES_READY';
+export const MEETING_COMPLETE_SNOOZE_CATEGORY = 'MEETING_COMPLETE_SNOOZE';
+export const MEETING_COMPLETE_REMINDER_CATEGORY = 'MEETING_COMPLETE_REMINDER';
+
+const COMPLETE_PROMPT_REMINDER_MS = 24 * 60 * 60 * 1000;
+
+function completeMeetingPath(meetingId: string) {
+  return `/mentor/command-center?completeMeeting=${encodeURIComponent(meetingId)}`;
+}
+
+async function personName(userId?: string | null) {
+  if (!userId) return '';
+  const { data } = await supabaseAdmin.from('users').select('name').eq('id', userId).maybeSingle();
+  return String(data?.name || '').trim();
+}
+
+async function insertMeetingNotice(row: {
+  userId: string;
+  title: string;
+  message: string;
+  category: string;
+  meetingId: string;
+  type?: 'INFO' | 'WARNING' | 'URGENT';
+}) {
+  const { error } = await supabaseAdmin.from('notifications').insert({
+    user_id: row.userId,
+    title: row.title,
+    message: row.message,
+    type: row.type || 'INFO',
+    category: row.category,
+    related_id: row.meetingId,
+    is_read: false,
+    created_by: 'system',
+  });
+  if (error) console.error(`Meeting notice insert failed (${row.category}):`, error.message);
+}
+
+/** First push + in-app alert once Gemini notes are saved and the meeting is still open. */
+export async function notifyMentorGeminiNotesReady(meeting: {
+  id: string;
+  title?: string | null;
+  mentor_id?: string | null;
+  student_id?: string | null;
+  completed?: boolean | null;
+}) {
+  try {
+    if (meeting.completed) return;
+    const mentorId = meeting.mentor_id;
+    if (!mentorId) return;
+
+    const { data: existing } = await supabaseAdmin
+      .from('notifications')
+      .select('id')
+      .eq('user_id', mentorId)
+      .eq('category', MEETING_NOTES_READY_CATEGORY)
+      .eq('related_id', meeting.id)
+      .limit(1);
+    if (existing && existing.length > 0) return;
+
+    const student = (await personName(meeting.student_id)) || 'your student';
+    const title = 'Gemini notes are ready';
+    const message = `Notes for your meeting with ${student} are ready. Open your dashboard to complete it.`;
+
+    await insertMeetingNotice({
+      userId: mentorId,
+      title,
+      message,
+      category: MEETING_NOTES_READY_CATEGORY,
+      meetingId: meeting.id,
+      type: 'WARNING',
+    });
+    await sendPushToUsers([mentorId], {
+      title,
+      body: message,
+      meetingId: meeting.id,
+      kind: 'notes_ready',
+      linkPath: completeMeetingPath(meeting.id),
+    });
+  } catch (err) {
+    console.error('notifyMentorGeminiNotesReady error:', err);
+  }
+}
+
+/** Mentor closed the complete-meeting prompt. The 24-hour reminder clock starts here. */
+export async function snoozeMeetingCompletePrompt(meetingId: string, mentorId: string) {
+  await supabaseAdmin
+    .from('notifications')
+    .delete()
+    .eq('user_id', mentorId)
+    .eq('category', MEETING_COMPLETE_SNOOZE_CATEGORY)
+    .eq('related_id', meetingId);
+
+  await insertMeetingNotice({
+    userId: mentorId,
+    title: 'Meeting completion postponed',
+    message: 'The mentor closed the complete-meeting prompt.',
+    category: MEETING_COMPLETE_SNOOZE_CATEGORY,
+    meetingId,
+  });
+}
+
+/**
+ * After the mentor dismisses the prompt, push again every 24 hours until the meeting is completed.
+ */
+export async function remindMentorsToCompleteNotedMeetings() {
+  const { data: meetings, error } = await supabaseAdmin
+    .from('meetings')
+    .select('id, title, mentor_id, student_id, completed, meet_status')
+    .eq('completed', false)
+    .eq('meet_status', 'notes_ready')
+    .not('mentor_id', 'is', null)
+    .limit(100);
+
+  if (error) {
+    console.error('Complete-meeting reminder fetch error:', error.message);
+    return;
+  }
+  if (!meetings || meetings.length === 0) return;
+
+  const ids = meetings.map((m) => m.id);
+  const { data: markers, error: markerError } = await supabaseAdmin
+    .from('notifications')
+    .select('user_id, related_id, category, created_at')
+    .in('related_id', ids)
+    .in('category', [MEETING_COMPLETE_SNOOZE_CATEGORY, MEETING_COMPLETE_REMINDER_CATEGORY]);
+
+  if (markerError) {
+    console.error('Complete-meeting reminder marker error:', markerError.message);
+    return;
+  }
+
+  const now = Date.now();
+  let sent = 0;
+  for (const meeting of meetings) {
+    const mentorId = meeting.mentor_id as string;
+    const rows = (markers || []).filter(
+      (row) => row.related_id === meeting.id && row.user_id === mentorId,
+    );
+    const snoozeAt = latestTime(rows, MEETING_COMPLETE_SNOOZE_CATEGORY);
+    if (!snoozeAt) continue;
+    const reminderAt = latestTime(rows, MEETING_COMPLETE_REMINDER_CATEGORY);
+    const anchor = Math.max(snoozeAt, reminderAt || 0);
+    if (now - anchor < COMPLETE_PROMPT_REMINDER_MS) continue;
+
+    const student = (await personName(meeting.student_id)) || 'your student';
+    const title = 'Meeting still needs to be completed';
+    const message = `Gemini notes for your meeting with ${student} are ready. Complete it from your dashboard.`;
+    await insertMeetingNotice({
+      userId: mentorId,
+      title,
+      message,
+      category: MEETING_COMPLETE_REMINDER_CATEGORY,
+      meetingId: meeting.id,
+      type: 'WARNING',
+    });
+    await sendPushToUsers([mentorId], {
+      title,
+      body: message,
+      meetingId: meeting.id,
+      kind: 'complete_reminder',
+      linkPath: completeMeetingPath(meeting.id),
+    });
+    sent += 1;
+  }
+  if (sent > 0) console.log(`📋 Sent ${sent} meeting-completion reminder(s)`);
+}
+
+function latestTime(
+  rows: Array<{ category?: string | null; created_at?: string | null }>,
+  category: string,
+) {
+  let latest = 0;
+  for (const row of rows) {
+    if (row.category !== category || !row.created_at) continue;
+    const time = new Date(row.created_at).getTime();
+    if (Number.isFinite(time) && time > latest) latest = time;
+  }
+  return latest || null;
 }
 
 export function meetingScheduleFieldsChanged(

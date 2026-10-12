@@ -156,7 +156,8 @@ export async function executeDueWorkflowActions(): Promise<{ executedCount: numb
       .eq('id', studentId)
       .maybeSingle();
 
-    const senderId = profile?.mentor_id || adminUser?.id;
+    // Acceptance and follow-up automations are from the admin, not the student's mentor.
+    const senderId = adminUser?.id;
 
     if (!senderId) {
       await supabaseAdmin
@@ -166,18 +167,28 @@ export async function executeDueWorkflowActions(): Promise<{ executedCount: numb
       continue;
     }
 
+    let mentorName = 'Your Mentor';
+    if (profile?.mentor_id) {
+      const { data: mentorUser } = await supabaseAdmin
+        .from('users')
+        .select('name')
+        .eq('id', profile.mentor_id)
+        .maybeSingle();
+      if (mentorUser?.name) mentorName = mentorUser.name;
+    }
+
     const { data: senderUser } = await supabaseAdmin
       .from('users')
       .select('name')
       .eq('id', senderId)
       .maybeSingle();
 
-    const senderName = senderUser?.name || 'Advisor';
+    const senderName = senderUser?.name || 'Admin';
 
     const formattedText = applyMessagePlaceholders(step.messageTemplate || '', {
       studentName,
       schoolName,
-      mentorName: senderName,
+      mentorName,
     });
 
     let conversationId = '';

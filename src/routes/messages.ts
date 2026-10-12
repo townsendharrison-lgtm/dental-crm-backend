@@ -18,6 +18,18 @@ const messageUpload = multer({
   },
 });
 
+/** Admin role preview can read another user's inbox via ?userId=. */
+function resolveInboxUser(req: AuthRequest, res: Response): string | null {
+  const authId = req.user!.id;
+  const requested = typeof req.query.userId === 'string' ? req.query.userId.trim() : '';
+  if (!requested || requested === authId) return authId;
+  if (req.user!.role !== 'ADMIN') {
+    res.status(403).json({ error: "Only an admin can open another user's inbox" });
+    return null;
+  }
+  return requested;
+}
+
 function attachmentFileName(conversationId: string, userId: string, originalName: string) {
   const ext = (originalName.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '');
   return `${conversationId}/${userId}/${Date.now()}.${ext || 'jpg'}`;
@@ -30,7 +42,8 @@ router.use(authenticate);
 // List all conversations the authenticated user is participating in
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const userId = req.user!.id;
+    const userId = resolveInboxUser(req, res);
+    if (!userId) return;
 
     // 1. Fetch conversations containing this user in participant_ids
     const { data: conversations, error } = await supabaseAdmin
@@ -177,7 +190,8 @@ router.get('/analytics/sent-monthly', async (req: AuthRequest, res: Response) =>
 // Fetch single conversation details
 router.get('/:id', async (req: AuthRequest, res: Response) => {
   try {
-    const userId = req.user!.id;
+    const userId = resolveInboxUser(req, res);
+    if (!userId) return;
     const { id } = req.params;
 
     const { data: conv, error } = await supabaseAdmin
@@ -314,7 +328,8 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 // Fetch messages inside a conversation (paginated)
 router.get('/:id/messages', async (req: AuthRequest, res: Response) => {
   try {
-    const userId = req.user!.id;
+    const userId = resolveInboxUser(req, res);
+    if (!userId) return;
     const { id } = req.params;
     const limit = parseInt(req.query.limit as string) || 50;
     const before = req.query.before as string; // Timestamp ISO
@@ -373,6 +388,14 @@ router.post('/:id/messages', (req: AuthRequest, res: Response, next: NextFunctio
 }, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
+    const requestedSender = typeof req.body?.asUserId === 'string' ? req.body.asUserId.trim() : '';
+    let senderId = userId;
+    if (requestedSender && requestedSender !== userId) {
+      if (req.user!.role !== 'ADMIN') {
+        return res.status(403).json({ error: "Only an admin can send as another user" });
+      }
+      senderId = requestedSender;
+    }
     const { id } = req.params;
     const rawText = typeof req.body?.text === 'string' ? req.body.text : '';
     const text = rawText.trim();
@@ -393,7 +416,7 @@ router.post('/:id/messages', (req: AuthRequest, res: Response, next: NextFunctio
       return res.status(404).json({ error: 'Conversation not found' });
     }
 
-    if (!conv.participant_ids.includes(userId)) {
+    if (!conv.participant_ids.includes(senderId)) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
@@ -401,7 +424,7 @@ router.post('/:id/messages', (req: AuthRequest, res: Response, next: NextFunctio
     const { data: senderUser } = await supabaseAdmin
       .from('users')
       .select('name')
-      .eq('id', userId)
+      .eq('id', senderId)
       .single();
 
     const senderName = senderUser?.name || 'Someone';
@@ -411,7 +434,7 @@ router.post('/:id/messages', (req: AuthRequest, res: Response, next: NextFunctio
     let attachmentName: string | null = null;
 
     if (file) {
-      const filePath = attachmentFileName(id, userId, file.originalname);
+      const filePath = attachmentFileName(id, senderId, file.originalname);
       const { error: uploadError } = await supabaseAdmin.storage
         .from('message-attachments')
         .upload(filePath, file.buffer, {
@@ -444,13 +467,13 @@ router.post('/:id/messages', (req: AuthRequest, res: Response, next: NextFunctio
       .from('messages')
       .insert({
         conversation_id: id,
-        sender_id: userId,
+        sender_id: senderId,
         text: text || '',
         attachment_url: attachmentUrl,
         attachment_type: attachmentType,
         attachment_name: attachmentName,
         link_preview: linkPreview,
-        read_by: [userId], // Sender has read their own message
+        read_by: [senderId], // Sender has read their own message
       })
       .select()
       .single();
@@ -466,7 +489,7 @@ router.post('/:id/messages', (req: AuthRequest, res: Response, next: NextFunctio
         : 'New message';
 
     // 3. Process Notifications for all other participants
-    const recipients = conv.participant_ids.filter((pId: string) => pId !== userId);
+    const recipients = conv.participant_ids.filter((pId: string) => pId !== senderId);
 
     if (recipients.length > 0) {
       // a. Insert In-App Notification
@@ -481,7 +504,7 @@ router.post('/:id/messages', (req: AuthRequest, res: Response, next: NextFunctio
         category: 'NEW_MESSAGE',
         related_id: id,
         is_read: false,
-        created_by: userId,
+        created_by: senderId,
       }));
 
       const { error: notifErr } = await supabaseAdmin

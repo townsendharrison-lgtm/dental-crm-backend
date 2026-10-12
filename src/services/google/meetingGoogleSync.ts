@@ -1,4 +1,5 @@
 import { supabaseAdmin } from '../../config/supabase.js';
+import { notifyMentorGeminiNotesReady } from '../meetingNotifications.js';
 import { dsgUserEmail, googleMeetEnabled } from './googleAuth.js';
 import {
   addMember,
@@ -445,7 +446,10 @@ export async function syncMeetingArtifacts(
   if (!records.length) {
     if (!force && now - scheduledEnd > NO_CONFERENCE_GIVE_UP_MS) {
       const saved = await saveDriveNotes(meeting, null, scheduledStart, scheduledEnd);
-      if (saved) return 'notes_ready';
+      if (saved) {
+        await notifyMentorGeminiNotesReady(meeting);
+        return 'notes_ready';
+      }
       await supabaseAdmin
         .from('meetings')
         .update({ meet_status: 'no_artifacts', artifacts_synced_at: new Date().toISOString() })
@@ -549,6 +553,7 @@ export async function syncMeetingArtifacts(
     console.error(`Meeting notes parse failed for meeting ${meeting.id}:`, err);
     await supabaseAdmin.from('meetings').update({ meet_error: errText(err) }).eq('id', meeting.id);
   }
+  await notifyMentorGeminiNotesReady(claimed);
   return 'notes_ready';
 }
 

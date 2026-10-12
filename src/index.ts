@@ -44,6 +44,7 @@ import { errorHandler } from './middleware/errorHandler.js';
 import { startReminderCron } from './services/lorReminderCron.js';
 import { startWorkflowCron } from './services/workflowCron.js';
 import { startMeetingReminderCron } from './services/meetingReminderCron.js';
+import { startMeetingCompletePromptCron } from './services/meetingCompletePromptCron.js';
 import { startMeetArtifactsCron } from './services/meetArtifactsCron.js';
 import { supabaseAdmin } from './config/supabase.js';
 
@@ -174,6 +175,7 @@ app.listen(PORT, () => {
   startWorkflowCron();
   // 15-minute meeting / webinar heads-up
   startMeetingReminderCron();
+  startMeetingCompletePromptCron();
   // Google Meet transcripts + Gemini notes → meeting summary / action items
   void initGoogleAuth().then(() => startMeetArtifactsCron());
 });

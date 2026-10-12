@@ -4,6 +4,10 @@ import { authenticate, AuthRequest } from '../middleware/auth.js';
 import {
   notifyMeetingParties,
   notifyMentorOfJoin,
+  snoozeMeetingCompletePrompt,
+  MEETING_NOTES_READY_CATEGORY,
+  MEETING_COMPLETE_SNOOZE_CATEGORY,
+  MEETING_COMPLETE_REMINDER_CATEGORY,
   meetingScheduleFieldsChanged,
   normalizeAudience,
   typeForAudience,
@@ -11,6 +15,7 @@ import {
   type MeetingAudience,
 } from '../services/meetingNotifications.js';
 import { dismissRelatedNotifications } from '../services/dismissNotifications.js';
+import { sendCompletedMeetingSummary } from '../services/meetingSummaryMessage.js';
 import {
   authMode,
   buildConnectUrl,
@@ -673,6 +678,23 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
         category: 'MEETING',
         relatedId: id,
       });
+      await dismissRelatedNotifications({
+        category: MEETING_NOTES_READY_CATEGORY,
+        relatedId: id,
+      });
+      await dismissRelatedNotifications({
+        category: MEETING_COMPLETE_SNOOZE_CATEGORY,
+        relatedId: id,
+      });
+      await dismissRelatedNotifications({
+        category: MEETING_COMPLETE_REMINDER_CATEGORY,
+        relatedId: id,
+      });
+      try {
+        await sendCompletedMeetingSummary(updated);
+      } catch (err) {
+        console.error(`Meeting summary DM failed for meeting ${id}:`, err);
+      }
     } else if (
       role !== 'STUDENT' &&
       meetingScheduleFieldsChanged(existing, updated)
@@ -803,6 +825,30 @@ router.post('/:id/google-meet/sync', async (req: AuthRequest, res: Response) => 
     res.json({ result, meeting: { ...fresh, audience: normalizeAudience(fresh) } });
   } catch (error: any) {
     console.error('Sync Google Meet artifacts error:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// ─── POST /api/meetings/:id/complete-prompt/dismiss ──────────────────
+// Mentor closed the "complete this meeting" prompt. Starts the 24-hour reminder.
+router.post('/:id/complete-prompt/dismiss', async (req: AuthRequest, res: Response) => {
+  try {
+    const { data: meeting } = await supabaseAdmin
+      .from('meetings')
+      .select('id, mentor_id, completed, meet_status')
+      .eq('id', req.params.id)
+      .maybeSingle();
+    if (!meeting) return res.status(404).json({ error: 'Meeting not found' });
+    if (meeting.mentor_id !== req.user!.id) {
+      return res.status(403).json({ error: 'Only the meeting mentor can postpone this' });
+    }
+    if (meeting.completed || meeting.meet_status !== 'notes_ready') {
+      return res.json({ ok: true, skipped: true });
+    }
+    await snoozeMeetingCompletePrompt(meeting.id, req.user!.id);
+    res.json({ ok: true });
+  } catch (error: any) {
+    console.error('Dismiss complete-meeting prompt error:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });

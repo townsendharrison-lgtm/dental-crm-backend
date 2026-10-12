@@ -141,10 +141,18 @@ router.get('/assignments', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), a
 });
 
 // GET /api/mentors/assignments/pending - Current mentor's pending proposals
+// Admins and mentor managers may pass ?mentorId= to inspect another mentor.
 // Must be registered before /:id
-router.get('/assignments/pending', authenticate, authorize('MENTOR'), async (req: AuthRequest, res: Response) => {
+router.get('/assignments/pending', authenticate, authorize('MENTOR', 'ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res: Response) => {
   try {
-    const mentorId = req.user!.id;
+    const requested = typeof req.query.mentorId === 'string' ? req.query.mentorId.trim() : '';
+    let mentorId = req.user!.id;
+    if (requested && requested !== req.user!.id) {
+      if (req.user!.role !== 'ADMIN' && req.user!.role !== 'MENTOR_MANAGER') {
+        return res.status(403).json({ error: "Only an admin can open another mentor's assignments" });
+      }
+      mentorId = requested;
+    }
     const { data, error } = await supabaseAdmin
       .from('student_assignments')
       .select('*')
@@ -369,233 +377,200 @@ router.delete('/:id', authenticate, authorize('ADMIN'), async (req: AuthRequest,
   }
 });
 
-// POST /api/mentors/assign - Propose student→mentor assignment (PENDING until mentor accepts)
+/** Point a student at a mentor. Replaces a pending proposal, including one created earlier for a different mentor. */
+async function proposeStudentMentor(options: {
+  studentId: string;
+  mentorId: string;
+  welcomeMessage?: string | null;
+  createdBy: string;
+  kind: 'assign' | 'transfer';
+}): Promise<{ status: number; body: Record<string, unknown> }> {
+  const { studentId, mentorId, createdBy, kind } = options;
+
+  const { data: studentUser, error: sErr } = await supabaseAdmin
+    .from('users')
+    .select('id, name')
+    .eq('id', studentId)
+    .eq('role', 'STUDENT')
+    .maybeSingle();
+
+  if (sErr || !studentUser) {
+    return { status: 404, body: { error: 'Student user not found' } };
+  }
+
+  const { data: mentorUser, error: mErr } = await supabaseAdmin
+    .from('users')
+    .select('id, name')
+    .eq('id', mentorId)
+    .eq('role', 'MENTOR')
+    .maybeSingle();
+
+  if (mErr || !mentorUser) {
+    return { status: 404, body: { error: 'Mentor user not found' } };
+  }
+
+  const { data: studentProfile, error: spErr } = await supabaseAdmin
+    .from('student_profiles')
+    .select('mentor_id')
+    .eq('id', studentId)
+    .maybeSingle();
+
+  if (spErr || !studentProfile) {
+    return { status: 404, body: { error: 'Student profile not found' } };
+  }
+
+  const currentMentorId = studentProfile.mentor_id as string | null;
+  if (currentMentorId === mentorId) {
+    return {
+      status: 200,
+      body: {
+        message: 'This student is already assigned to that mentor',
+        studentId,
+        mentorId,
+        alreadyAssigned: true,
+      },
+    };
+  }
+
+  const { data: rows, error: rowsErr } = await supabaseAdmin
+    .from('student_assignments')
+    .select('id, status, mentor_id, welcome_message')
+    .eq('student_id', studentId);
+
+  if (rowsErr) {
+    return { status: 500, body: { error: rowsErr.message } };
+  }
+
+  const pending = (rows || []).filter((row) => row.status === 'PENDING');
+  const keep = pending[0];
+  const extras = pending.slice(1);
+
+  const welcomeMessage =
+    options.welcomeMessage !== undefined
+      ? options.welcomeMessage
+      : keep?.welcome_message || (kind === 'transfer' ? 'Transferred from previous mentor.' : null);
+
+  let assignment;
+  if (keep) {
+    const { data, error } = await supabaseAdmin
+      .from('student_assignments')
+      .update({
+        mentor_id: mentorId,
+        status: 'PENDING',
+        assigned_at: new Date().toISOString(),
+        welcome_message: welcomeMessage,
+      })
+      .eq('id', keep.id)
+      .select()
+      .single();
+    if (error) return { status: 500, body: { error: error.message } };
+    assignment = data;
+  } else {
+    const { data, error } = await supabaseAdmin
+      .from('student_assignments')
+      .insert({
+        student_id: studentId,
+        mentor_id: mentorId,
+        status: 'PENDING',
+        assigned_at: new Date().toISOString(),
+        welcome_message: welcomeMessage,
+      })
+      .select()
+      .single();
+    if (error) return { status: 500, body: { error: error.message } };
+    assignment = data;
+  }
+
+  if (extras.length > 0) {
+    await supabaseAdmin
+      .from('student_assignments')
+      .delete()
+      .in('id', extras.map((row) => row.id));
+  }
+
+  if (currentMentorId) {
+    await supabaseAdmin
+      .from('student_assignments')
+      .update({
+        status: 'TRANSFERRED',
+        transferred_at: new Date().toISOString(),
+      })
+      .eq('student_id', studentId)
+      .eq('mentor_id', currentMentorId)
+      .eq('status', 'ACCEPTED');
+  }
+
+  if (currentMentorId) {
+    const { error: updateErr } = await supabaseAdmin
+      .from('student_profiles')
+      .update({ mentor_id: null, updated_at: new Date().toISOString() })
+      .eq('id', studentId);
+    if (updateErr) return { status: 500, body: { error: updateErr.message } };
+  }
+
+  await dismissRelatedNotificationsMany(
+    'ASSIGNMENT',
+    pending.map((row) => row.id),
+  );
+
+  const { notifyMentorOfAssignment } = await import('../services/assignmentNotifications.js');
+  await notifyMentorOfAssignment({
+    mentorId,
+    assignmentId: assignment.id,
+    studentName: studentUser.name || 'Student',
+    createdBy,
+    kind: currentMentorId ? 'transfer' : kind,
+  });
+
+  return {
+    status: 200,
+    body: {
+      message: currentMentorId
+        ? 'Transfer sent — waiting for the new mentor to accept'
+        : 'Assignment sent — waiting for the mentor to accept',
+      studentId,
+      mentorId,
+      oldMentorId: currentMentorId,
+      assignment,
+    },
+  };
+}
+
+// POST /api/mentors/assign - Propose student to mentor (PENDING until mentor accepts)
 // Access: Admins and Mentor Managers
 router.post('/assign', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res: Response) => {
   try {
     const { studentId, mentorId, welcomeMessage } = req.body;
-
-    if (!studentId) {
-      return res.status(400).json({ error: 'studentId is required' });
-    }
-    if (!mentorId) {
-      return res.status(400).json({ error: 'mentorId is required' });
-    }
-
-    const { data: studentUser, error: sErr } = await supabaseAdmin
-      .from('users')
-      .select('id, name')
-      .eq('id', studentId)
-      .eq('role', 'STUDENT')
-      .maybeSingle();
-
-    if (sErr || !studentUser) {
-      return res.status(404).json({ error: 'Student user not found' });
-    }
-
-    const { data: mentorUser, error: mErr } = await supabaseAdmin
-      .from('users')
-      .select('id, name')
-      .eq('id', mentorId)
-      .eq('role', 'MENTOR')
-      .maybeSingle();
-
-    if (mErr || !mentorUser) {
-      return res.status(404).json({ error: 'Mentor user not found' });
-    }
-
-    // Do NOT link student yet — wait for mentor acceptance.
-    // Keep student unassigned (or clear mentor if somehow set).
-    await supabaseAdmin
-      .from('student_profiles')
-      .update({ mentor_id: null, updated_at: new Date().toISOString() })
-      .eq('id', studentId);
-
-    // Upsert pending assignment (one pending row per student)
-    const { data: existingPending } = await supabaseAdmin
-      .from('student_assignments')
-      .select('id')
-      .eq('student_id', studentId)
-      .eq('status', 'PENDING')
-      .maybeSingle();
-
-    // Clear stale action-required alerts for this student (prior pending / declines)
-    const { data: priorAssignments } = await supabaseAdmin
-      .from('student_assignments')
-      .select('id')
-      .eq('student_id', studentId)
-      .in('status', ['PENDING', 'DECLINED']);
-    await dismissRelatedNotificationsMany(
-      'ASSIGNMENT',
-      (priorAssignments || []).map((a) => a.id),
-    );
-
-    let assignment;
-    if (existingPending) {
-      const { data, error } = await supabaseAdmin
-        .from('student_assignments')
-        .update({
-          mentor_id: mentorId,
-          assigned_at: new Date().toISOString(),
-          welcome_message: welcomeMessage || null,
-        })
-        .eq('id', existingPending.id)
-        .select()
-        .single();
-      if (error) return res.status(500).json({ error: error.message });
-      assignment = data;
-    } else {
-      const { data, error } = await supabaseAdmin
-        .from('student_assignments')
-        .insert({
-          student_id: studentId,
-          mentor_id: mentorId,
-          status: 'PENDING',
-          assigned_at: new Date().toISOString(),
-          welcome_message: welcomeMessage || null,
-        })
-        .select()
-        .single();
-      if (error) return res.status(500).json({ error: error.message });
-      assignment = data;
-    }
-
-    // Notify the mentor (in-app + push with Accept/Decline CTAs)
-    const { notifyMentorOfAssignment } = await import('../services/assignmentNotifications.js');
-    await notifyMentorOfAssignment({
+    if (!studentId) return res.status(400).json({ error: 'studentId is required' });
+    if (!mentorId) return res.status(400).json({ error: 'mentorId is required' });
+    const result = await proposeStudentMentor({
+      studentId,
       mentorId,
-      assignmentId: assignment.id,
-      studentName: studentUser.name || 'Student',
+      welcomeMessage: welcomeMessage || null,
       createdBy: req.user!.id,
       kind: 'assign',
     });
-
-    res.json({
-      message: 'Assignment proposed — waiting for mentor acceptance',
-      studentId,
-      mentorId,
-      assignment,
-    });
+    return res.status(result.status).json(result.body);
   } catch (error: any) {
     console.error('Error assigning mentor:', error);
     res.status(500).json({ error: error.message || 'Server error assigning mentor' });
   }
 });
 
-// POST /api/mentors/transfer - Transfer student (PENDING until new mentor accepts)
-// Access: Admins and Mentor Managers
+// POST /api/mentors/transfer - Move a student to a different mentor (PENDING until they accept)
 router.post('/transfer', authenticate, authorize('ADMIN', 'MENTOR_MANAGER'), async (req: AuthRequest, res: Response) => {
   try {
     const { studentId, newMentorId, note } = req.body;
-
-    if (!studentId) {
-      return res.status(400).json({ error: 'studentId is required' });
-    }
-    if (!newMentorId) {
-      return res.status(400).json({ error: 'newMentorId is required' });
-    }
-
-    const { data: studentProfile, error: spErr } = await supabaseAdmin
-      .from('student_profiles')
-      .select('mentor_id')
-      .eq('id', studentId)
-      .maybeSingle();
-
-    if (spErr || !studentProfile) {
-      return res.status(404).json({ error: 'Student profile not found' });
-    }
-
-    const oldMentorId = studentProfile.mentor_id;
-
-    const { data: mentorUser, error: mErr } = await supabaseAdmin
-      .from('users')
-      .select('id, name')
-      .eq('id', newMentorId)
-      .eq('role', 'MENTOR')
-      .maybeSingle();
-
-    if (mErr || !mentorUser) {
-      return res.status(404).json({ error: 'New mentor user not found' });
-    }
-
-    const { data: studentUser } = await supabaseAdmin
-      .from('users')
-      .select('name')
-      .eq('id', studentId)
-      .maybeSingle();
-
-    // Mark old accepted assignment as TRANSFERRED
-    if (oldMentorId) {
-      await supabaseAdmin
-        .from('student_assignments')
-        .update({
-          status: 'TRANSFERRED',
-          transferred_at: new Date().toISOString(),
-        })
-        .eq('student_id', studentId)
-        .eq('mentor_id', oldMentorId)
-        .eq('status', 'ACCEPTED');
-    }
-
-    // Unlink student until new mentor accepts
-    const { error: updateErr } = await supabaseAdmin
-      .from('student_profiles')
-      .update({ mentor_id: null, updated_at: new Date().toISOString() })
-      .eq('id', studentId);
-
-    if (updateErr) {
-      return res.status(500).json({ error: updateErr.message });
-    }
-
-    // Replace any existing pending with the transfer target
-    const { data: pendingToClear } = await supabaseAdmin
-      .from('student_assignments')
-      .select('id')
-      .eq('student_id', studentId)
-      .eq('status', 'PENDING');
-    await dismissRelatedNotificationsMany(
-      'ASSIGNMENT',
-      (pendingToClear || []).map((a) => a.id),
-    );
-
-    await supabaseAdmin
-      .from('student_assignments')
-      .delete()
-      .eq('student_id', studentId)
-      .eq('status', 'PENDING');
-
-    const { data: assignment, error: logErr } = await supabaseAdmin
-      .from('student_assignments')
-      .insert({
-        student_id: studentId,
-        mentor_id: newMentorId,
-        status: 'PENDING',
-        assigned_at: new Date().toISOString(),
-        welcome_message: note || 'Transferred from previous mentor.',
-      })
-      .select()
-      .single();
-
-    if (logErr) {
-      return res.status(500).json({ error: logErr.message });
-    }
-
-    const { notifyMentorOfAssignment } = await import('../services/assignmentNotifications.js');
-    await notifyMentorOfAssignment({
+    if (!studentId) return res.status(400).json({ error: 'studentId is required' });
+    if (!newMentorId) return res.status(400).json({ error: 'newMentorId is required' });
+    const result = await proposeStudentMentor({
+      studentId,
       mentorId: newMentorId,
-      assignmentId: assignment.id,
-      studentName: studentUser?.name || 'A student',
+      welcomeMessage: note || 'Transferred from previous mentor.',
       createdBy: req.user!.id,
       kind: 'transfer',
     });
-
-    res.json({
-      message: 'Transfer initiated — waiting for mentor acceptance',
-      studentId,
-      oldMentorId,
-      newMentorId,
-      assignment,
-    });
+    return res.status(result.status).json(result.body);
   } catch (error: any) {
     console.error('Error transferring student:', error);
     res.status(500).json({ error: error.message || 'Server error transferring student' });

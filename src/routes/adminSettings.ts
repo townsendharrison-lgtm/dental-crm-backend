@@ -100,7 +100,20 @@ router.put('/', authorize('ADMIN'), async (req: AuthRequest, res: Response) => {
           if (!label) return null;
           const rawItems = row?.recommendedActionItems ?? row?.recommended_action_items;
           const recommendedActionItems = Array.isArray(rawItems)
-            ? rawItems.map((item: unknown) => String(item || '').trim()).filter(Boolean)
+            ? rawItems
+                .map((item: unknown) => {
+                  if (typeof item === 'string') {
+                    const task = item.trim();
+                    return task ? { task } : null;
+                  }
+                  if (!item || typeof item !== 'object') return null;
+                  const entry = item as { task?: unknown; resourceLink?: unknown; resource_link?: unknown };
+                  const task = String(entry.task || '').trim();
+                  if (!task) return null;
+                  const resourceLink = String(entry.resourceLink || entry.resource_link || '').trim();
+                  return resourceLink ? { task, resourceLink } : { task };
+                })
+                .filter(Boolean)
             : [];
           return {
             id: String(row?.id || `type-${index + 1}`).trim() || `type-${index + 1}`,
