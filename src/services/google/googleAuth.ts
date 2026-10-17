@@ -13,13 +13,18 @@ import { supabaseAdmin } from '../../config/supabase.js';
  * Modes 2 and 3 need GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET.
  */
 
-export const GOOGLE_SCOPES = [
+const CORE_GOOGLE_SCOPES = [
   'https://www.googleapis.com/auth/meetings.space.created',
   'https://www.googleapis.com/auth/meetings.space.settings',
   'https://www.googleapis.com/auth/meetings.space.readonly',
   'https://www.googleapis.com/auth/calendar.events',
   'https://www.googleapis.com/auth/drive.readonly',
 ];
+
+/** Full Drive is required to share Meet-created docs. Service-account calls keep the core scopes. */
+const DRIVE_SHARE_SCOPE = 'https://www.googleapis.com/auth/drive';
+
+export const GOOGLE_SCOPES = [...CORE_GOOGLE_SCOPES, DRIVE_SHARE_SCOPE];
 
 const CONNECT_SCOPES = [...GOOGLE_SCOPES, 'openid', 'email'];
 const STATE_TTL_MS = 15 * 60 * 1000;
@@ -244,7 +249,7 @@ function getClient(): RequestClient {
     cachedClient = new JWT({
       email: sa.client_email,
       key: sa.private_key,
-      scopes: GOOGLE_SCOPES,
+      scopes: CORE_GOOGLE_SCOPES,
       subject: dsgUserEmail(),
     });
   } else if (mode === 'oauth_env' || mode === 'oauth_connected') {
@@ -265,6 +270,38 @@ export interface GoogleRequestOptions {
   data?: unknown;
   params?: Record<string, string | number | boolean | undefined>;
   responseType?: 'json' | 'text';
+}
+
+/** Make a Meet notes doc readable by anyone with the link. */
+export async function shareDriveFileWithAnyone(fileId: string): Promise<void> {
+  const url = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}/permissions`;
+  const data = { role: 'reader', type: 'anyone', allowFileDiscovery: false };
+  const params = { supportsAllDrives: true };
+  try {
+    if (authMode() === 'service_account') {
+      const sa = parseServiceAccount(process.env.GOOGLE_SERVICE_ACCOUNT_JSON!);
+      const jwt = new JWT({
+        email: sa.client_email,
+        key: sa.private_key,
+        scopes: [DRIVE_SHARE_SCOPE],
+        subject: dsgUserEmail(),
+      });
+      await jwt.request({ url, method: 'POST', data, params });
+      return;
+    }
+    await googleRequest(url, { method: 'POST', data, params });
+  } catch (err: any) {
+    const status = err instanceof GoogleApiError ? err.status : err?.response?.status;
+    const body = err?.response?.data;
+    const msg = String(
+      err instanceof GoogleApiError
+        ? err.message
+        : body?.error?.message || err?.message || '',
+    );
+    if (status === 409 || /already exists/i.test(msg)) return;
+    if (err instanceof GoogleApiError) throw err;
+    throw new GoogleApiError(`${status || 'ERR'} ${msg || 'Could not share the notes document'}`, status || 0, body);
+  }
 }
 
 export async function googleRequest<T = any>(

@@ -45,6 +45,12 @@ const STAFF_ONLY_MEETING_FIELDS = [
   'meet_error',
   'google_calendar_event_id',
   'conference_record_name',
+  'ai_draft',
+  'commitments_completed',
+  'incomplete_reason',
+  'incomplete_reason_detail',
+  'verified_summary',
+  'verified_school_timeline',
 ] as const;
 
 function stripForRole<T extends Record<string, any>>(meeting: T, role: string): T {
@@ -622,6 +628,18 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
       if (updates.timezone !== undefined) dbUpdates.timezone = updates.timezone;
       if (updates.duration !== undefined) dbUpdates.duration = updates.duration;
       if (updates.summary !== undefined) dbUpdates.summary = updates.summary;
+      if (updates.officialSummary !== undefined) dbUpdates.official_summary = updates.officialSummary;
+      if (updates.official_summary !== undefined) dbUpdates.official_summary = updates.official_summary;
+      if (updates.commitmentsCompleted !== undefined) dbUpdates.commitments_completed = updates.commitmentsCompleted || null;
+      if (updates.commitments_completed !== undefined) dbUpdates.commitments_completed = updates.commitments_completed || null;
+      if (updates.incompleteReason !== undefined) dbUpdates.incomplete_reason = updates.incompleteReason || null;
+      if (updates.incomplete_reason !== undefined) dbUpdates.incomplete_reason = updates.incomplete_reason || null;
+      if (updates.incompleteReasonDetail !== undefined) dbUpdates.incomplete_reason_detail = updates.incompleteReasonDetail || null;
+      if (updates.incomplete_reason_detail !== undefined) dbUpdates.incomplete_reason_detail = updates.incomplete_reason_detail || null;
+      if (updates.verifiedSummary !== undefined) dbUpdates.verified_summary = !!updates.verifiedSummary;
+      if (updates.verified_summary !== undefined) dbUpdates.verified_summary = !!updates.verified_summary;
+      if (updates.verifiedSchoolTimeline !== undefined) dbUpdates.verified_school_timeline = !!updates.verifiedSchoolTimeline;
+      if (updates.verified_school_timeline !== undefined) dbUpdates.verified_school_timeline = !!updates.verified_school_timeline;
       if (updates.notes !== undefined) dbUpdates.notes = updates.notes;
       if (updates.mentorNotes !== undefined) dbUpdates.mentor_notes = updates.mentorNotes;
       if (updates.mentor_notes !== undefined) dbUpdates.mentor_notes = updates.mentor_notes;

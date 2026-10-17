@@ -1,6 +1,6 @@
 import { supabaseAdmin } from '../../config/supabase.js';
 import { notifyMentorGeminiNotesReady } from '../meetingNotifications.js';
-import { dsgUserEmail, googleMeetEnabled } from './googleAuth.js';
+import { dsgUserEmail, googleMeetEnabled, shareDriveFileWithAnyone } from './googleAuth.js';
 import {
   addMember,
   createCalendarEvent,
@@ -399,6 +399,61 @@ async function findDriveDocs(
   };
 }
 
+function docIdFromUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const match = url.match(/\/document\/d\/([^/?#]+)/);
+  return match?.[1] || null;
+}
+
+async function loadMeetingTypeLabels(): Promise<string[]> {
+  const { data } = await supabaseAdmin
+    .from('admin_settings')
+    .select('meeting_types')
+    .eq('id', 1)
+    .maybeSingle();
+  const rows = Array.isArray(data?.meeting_types) ? data.meeting_types : [];
+  const labels = rows
+    .map((row: any) => String(row?.label || '').trim())
+    .filter(Boolean);
+  if (!labels.some((label) => label.toLowerCase() === 'other')) labels.push('Other');
+  return labels;
+}
+
+async function shareNoteDocs(ids: Array<string | null | undefined>) {
+  const unique = Array.from(new Set(ids.filter((id): id is string => !!id)));
+  for (const id of unique) {
+    try {
+      await shareDriveFileWithAnyone(id);
+    } catch (err) {
+      console.error(
+        `Could not share notes doc ${id} with anyone who has the link. Reconnect Google and allow Drive access:`,
+        errText(err),
+      );
+    }
+  }
+}
+
+/** Save the review draft. Student tasks are created only when the mentor submits the form. */
+async function storeNotesDraft(
+  meetingId: string,
+  text: string,
+  source: 'smart_notes' | 'transcript',
+  meetingDate: string,
+  docIds: Array<string | null | undefined>,
+) {
+  await shareNoteDocs(docIds);
+  if (!text.trim()) return;
+  try {
+    const typeLabels = await loadMeetingTypeLabels();
+    const draft = await parseMeetingNotes(text, source, { typeLabels, meetingDate });
+    const { error } = await supabaseAdmin.from('meetings').update({ ai_draft: draft }).eq('id', meetingId);
+    if (error) throw new Error(error.message);
+  } catch (err) {
+    console.error(`Meeting notes parse failed for meeting ${meetingId}:`, err);
+    await supabaseAdmin.from('meetings').update({ meet_error: errText(err) }).eq('id', meetingId);
+  }
+}
+
 function mergeMeetingNotes(existing: string | null | undefined, text: string, docLink: string | null): string {
   const body = text.trim().slice(0, MAX_NOTES_CHARS);
   const block = [NOTES_MARK, docLink ? `Document: ${docLink}` : '', body].filter(Boolean).join('\n');
@@ -534,21 +589,12 @@ export async function syncMeetingArtifacts(
         .eq('id', meeting.id);
     }
 
-    const parsed = await parseMeetingNotes(text, source);
-    if (claimed.student_id && parsed.actionItems.length) {
-      const rows = parsed.actionItems.map((item) => ({
-        student_id: claimed.student_id,
-        meeting_id: meeting.id,
-        task: item.task,
-        due_date: new Date(lastEnd + item.dueInDays * 24 * 60 * 60 * 1000).toISOString(),
-        priority: item.priority,
-        status: 'PENDING',
-        category: 'Meeting',
-        description: `From Gemini notes: ${claimed.title}`,
-      }));
-      const { error } = await supabaseAdmin.from('action_items').insert(rows);
-      if (error) throw new Error(`action_items insert: ${error.message}`);
-    }
+    const noteId =
+      readyNotes[readyNotes.length - 1]?.docsDestination?.document || docIdFromUrl(notesDoc);
+    const transcriptId =
+      readyTranscripts[readyTranscripts.length - 1]?.docsDestination?.document ||
+      docIdFromUrl(transcriptDoc);
+    await storeNotesDraft(meeting.id, text, source, meeting.date, [noteId, transcriptId]);
   } catch (err) {
     console.error(`Meeting notes parse failed for meeting ${meeting.id}:`, err);
     await supabaseAdmin.from('meetings').update({ meet_error: errText(err) }).eq('id', meeting.id);
@@ -583,7 +629,13 @@ async function saveDriveNotes(
     .is('artifacts_synced_at', null)
     .select('id')
     .maybeSingle();
-  return !!claimed;
+  if (!claimed) return false;
+  const source = found.notes ? 'smart_notes' : 'transcript';
+  await storeNotesDraft(meeting.id, text, source, meeting.date, [
+    found.notes ? found.notes.id : null,
+    found.transcript ? found.transcript.id : null,
+  ]);
+  return true;
 }
 
 async function enableCohostNotes(meetings: { id: string; google_space_name?: string | null }[]): Promise<void> {
@@ -632,6 +684,27 @@ export async function syncRecentMeetingArtifacts(): Promise<void> {
     .is('transcript_doc_url', null)
     .gt('date', new Date(now - DRIVE_RETRY_MS).toISOString())
     .limit(50);
+
+  const { data: unparsed, error: unparsedErr } = await supabaseAdmin
+    .from('meetings')
+    .select('id, notes, date, notes_doc_url, transcript_doc_url')
+    .eq('meet_status', 'notes_ready')
+    .eq('completed', false)
+    .is('ai_draft', null)
+    .not('notes', 'is', null)
+    .limit(20);
+  if (unparsedErr) {
+    console.error('Meeting draft backfill failed. Run migration 066_meeting_completion_review.sql:', unparsedErr.message);
+  }
+  for (const row of unparsed || []) {
+    await storeNotesDraft(
+      row.id,
+      row.notes || '',
+      row.notes_doc_url ? 'smart_notes' : 'transcript',
+      row.date,
+      [docIdFromUrl(row.notes_doc_url), docIdFromUrl(row.transcript_doc_url)],
+    );
+  }
 
   let ready = 0;
   for (const m of [...((meetings || []) as MeetingRecord[]), ...((missed || []) as MeetingRecord[])]) {

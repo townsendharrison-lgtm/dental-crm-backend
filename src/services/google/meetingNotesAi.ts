@@ -1,8 +1,23 @@
 import { GoogleGenAI, Type } from '@google/genai';
 
+export interface ParsedStudentAction {
+  task: string;
+  dueInDays: number;
+  priority: 'HIGH' | 'MEDIUM' | 'LOW';
+}
+
+export interface ParsedNextMeeting {
+  mentioned: boolean;
+  typeName: string;
+  date: string;
+  time: string;
+}
+
 export interface ParsedMeetingNotes {
   summary: string;
-  actionItems: Array<{ task: string; dueInDays: number; priority: 'HIGH' | 'MEDIUM' | 'LOW' }>;
+  studentActionItems: ParsedStudentAction[];
+  mentorActionItems: string[];
+  nextMeeting: ParsedNextMeeting | null;
 }
 
 const MAX_INPUT_CHARS = 120_000;
@@ -17,27 +32,51 @@ function getClient(): GoogleGenAI | null {
   return client;
 }
 
+function cleanDate(raw: unknown): string {
+  const value = String(raw || '').trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : '';
+}
+
+function cleanTime(raw: unknown): string {
+  const value = String(raw || '').trim();
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value);
+  if (!match) return '';
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour > 23 || minute > 59) return '';
+  return `${String(hour).padStart(2, '0')}:${match[2]}`;
+}
+
 /**
- * Turn Gemini meeting notes (preferred) or a raw transcript into a short
- * summary plus student action items. Falls back to a trimmed raw excerpt
- * when no Gemini key is configured.
+ * Turn Gemini meeting notes (preferred) or a raw transcript into a draft the
+ * mentor reviews on the complete-meeting form. Nothing here is saved as a
+ * student task until the mentor submits that form.
  */
 export async function parseMeetingNotes(
   text: string,
   source: 'smart_notes' | 'transcript',
+  options: { typeLabels?: string[]; meetingDate?: string } = {},
 ): Promise<ParsedMeetingNotes> {
+  const empty: ParsedMeetingNotes = {
+    summary: '',
+    studentActionItems: [],
+    mentorActionItems: [],
+    nextMeeting: null,
+  };
   const body = text.trim().slice(0, MAX_INPUT_CHARS);
-  if (!body) return { summary: '', actionItems: [] };
+  if (!body) return empty;
 
   const ai = getClient();
   if (!ai) {
-    return { summary: body.slice(0, 4000), actionItems: [] };
+    return { ...empty, summary: body.slice(0, 4000) };
   }
 
+  const labels = (options.typeLabels || []).map((label) => label.trim()).filter(Boolean);
   const instructions =
     source === 'smart_notes'
       ? 'These are Google Meet "Take notes with Gemini" notes from a dental-school admissions mentoring session.'
       : 'This is a raw Google Meet transcript from a dental-school admissions mentoring session.';
+  const meetingDate = options.meetingDate ? options.meetingDate.slice(0, 10) : '';
 
   const response = await ai.models.generateContent({
     model: process.env.MEETING_NOTES_MODEL || 'gemini-2.5-flash',
@@ -48,10 +87,18 @@ export async function parseMeetingNotes(
           {
             text:
               `${instructions}\n` +
-              'Write a concise summary (max ~200 words) for the CRM, and list the concrete ' +
-              'action items the STUDENT agreed to do. Skip action items for the mentor. ' +
+              (meetingDate ? `The meeting took place on ${meetingDate}.\n` : '') +
+              (labels.length ? `Known session type names: ${labels.join(', ')}.\n` : '') +
+              'Write a concise official summary (max ~200 words) a mentor can review and edit. ' +
+              'List concrete next steps the STUDENT agreed to do, and separately the next steps the MENTOR agreed to do. ' +
+              'If they agreed on a future meeting, set nextMeeting.mentioned to true. ' +
+              'typeName should be the closest known session type, or a short custom name when none fits. ' +
+              'date is YYYY-MM-DD only when a calendar date was stated or can be resolved from the meeting date (for example "next Thursday"). ' +
+              'time is 24-hour HH:mm only when a clock time was stated. ' +
+              'Leave date and time empty when they were not said. ' +
+              'If no next meeting was discussed, set mentioned to false. ' +
               'dueInDays is your best estimate from the conversation (default 7). ' +
-              'Do not invent anything not supported by the text.\n\n' +
+              'Do not invent anything the text does not support.\n\n' +
               body,
           },
         ],
@@ -64,7 +111,7 @@ export async function parseMeetingNotes(
         type: Type.OBJECT,
         properties: {
           summary: { type: Type.STRING },
-          actionItems: {
+          studentActionItems: {
             type: Type.ARRAY,
             items: {
               type: Type.OBJECT,
@@ -76,23 +123,49 @@ export async function parseMeetingNotes(
               required: ['task'],
             },
           },
+          mentorActionItems: { type: Type.ARRAY, items: { type: Type.STRING } },
+          nextMeeting: {
+            type: Type.OBJECT,
+            properties: {
+              mentioned: { type: Type.BOOLEAN },
+              typeName: { type: Type.STRING },
+              date: { type: Type.STRING },
+              time: { type: Type.STRING },
+            },
+            required: ['mentioned'],
+          },
         },
-        required: ['summary', 'actionItems'],
+        required: ['summary', 'studentActionItems', 'mentorActionItems'],
       },
     },
   });
 
   const parsed = JSON.parse(response.text || '{}');
-  const items = Array.isArray(parsed.actionItems) ? parsed.actionItems : [];
+  const items = Array.isArray(parsed.studentActionItems) ? parsed.studentActionItems : [];
+  const mentorItems = Array.isArray(parsed.mentorActionItems) ? parsed.mentorActionItems : [];
+  const next = parsed.nextMeeting;
+  const mentioned = !!next?.mentioned;
   return {
     summary: String(parsed.summary || '').trim(),
-    actionItems: items
-      .filter((i: any) => typeof i?.task === 'string' && i.task.trim())
+    studentActionItems: items
+      .filter((item: any) => typeof item?.task === 'string' && item.task.trim())
       .slice(0, 15)
-      .map((i: any) => ({
-        task: i.task.trim().slice(0, 500),
-        dueInDays: Math.min(90, Math.max(1, Math.round(Number(i.dueInDays) || 7))),
-        priority: ['HIGH', 'MEDIUM', 'LOW'].includes(i.priority) ? i.priority : 'MEDIUM',
+      .map((item: any) => ({
+        task: item.task.trim().slice(0, 500),
+        dueInDays: Math.min(90, Math.max(1, Math.round(Number(item.dueInDays) || 7))),
+        priority: ['HIGH', 'MEDIUM', 'LOW'].includes(item.priority) ? item.priority : 'MEDIUM',
       })),
+    mentorActionItems: mentorItems
+      .map((item: unknown) => String(item || '').trim())
+      .filter(Boolean)
+      .slice(0, 15),
+    nextMeeting: mentioned
+      ? {
+          mentioned: true,
+          typeName: String(next?.typeName || '').trim().slice(0, 120),
+          date: cleanDate(next?.date),
+          time: cleanTime(next?.time),
+        }
+      : null,
   };
 }
