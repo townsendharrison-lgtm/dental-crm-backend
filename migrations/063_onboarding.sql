@@ -7,3 +7,6 @@ ALTER TABLE public.admin_settings
 
 ALTER TABLE public.users
   ADD COLUMN IF NOT EXISTS onboarding_completed_at TIMESTAMPTZ;
+
+ALTER TABLE public.users
+  ADD COLUMN IF NOT EXISTS onboarding_step_ids TEXT[] DEFAULT '{}';

@@ -2,6 +2,11 @@ import { Router, Response } from 'express';
 import multer from 'multer';
 import { supabaseAdmin } from '../config/supabase.js';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth.js';
+import {
+  notifyMentorStudentOnboardingReady,
+  onboardingStepsComplete,
+  studentOnboardingStepIds,
+} from '../services/onboardingComplete.js';
 
 const router = Router();
 
@@ -43,10 +48,13 @@ router.get('/profile', authenticate, async (req: AuthRequest, res: Response) => 
 // Update user profile
 router.put('/profile', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const { name, avatar, weeklyLeadGoal, monthlyLeadGoal, timezone, onboardingCompleted } = req.body;
+    const { name, avatar, weeklyLeadGoal, monthlyLeadGoal, timezone, onboardingCompleted, onboardingStepId } =
+      req.body;
     const updates: Record<string, unknown> = {
       updated_at: new Date().toISOString(),
     };
+    let notifyOnboardingReady = false;
+    let onboardingStudentName = '';
 
     if (typeof name === 'string' && name.trim()) updates.name = name.trim();
     if (avatar !== undefined) updates.avatar = avatar;
@@ -57,6 +65,39 @@ router.put('/profile', authenticate, async (req: AuthRequest, res: Response) => 
     }
     if (onboardingCompleted === true) {
       updates.onboarding_completed_at = new Date().toISOString();
+    }
+
+    if (typeof onboardingStepId === 'string' && onboardingStepId.trim()) {
+      if (req.user!.role !== 'STUDENT') {
+        return res.status(403).json({ error: 'Only students mark onboarding steps complete' });
+      }
+      const stepId = onboardingStepId.trim();
+      const { data: current, error: currentErr } = await supabaseAdmin
+        .from('users')
+        .select('name, onboarding_step_ids, onboarding_completed_at')
+        .eq('id', req.user!.id)
+        .single();
+      if (currentErr) {
+        const missing = /onboarding_step_ids/i.test(currentErr.message);
+        return res.status(400).json({
+          error: missing
+            ? 'Onboarding progress was not saved. Run backend/migrations/064_onboarding_steps.sql in Supabase, then try again.'
+            : currentErr.message,
+        });
+      }
+      const completed = new Set<string>(
+        Array.isArray(current?.onboarding_step_ids) ? current.onboarding_step_ids : [],
+      );
+      completed.add(stepId);
+      const required = await studentOnboardingStepIds();
+      const finished =
+        !current?.onboarding_completed_at && onboardingStepsComplete(required, [...completed]);
+      updates.onboarding_step_ids = [...completed];
+      if (finished) {
+        updates.onboarding_completed_at = new Date().toISOString();
+        notifyOnboardingReady = true;
+        onboardingStudentName = String(current?.name || '').trim();
+      }
     }
 
     if (Object.keys(updates).length === 1) {
@@ -71,7 +112,19 @@ router.put('/profile', authenticate, async (req: AuthRequest, res: Response) => 
       .single();
 
     if (error) {
-      return res.status(400).json({ error: error.message });
+      const missing = /onboarding_step_ids/i.test(error.message || '');
+      return res.status(400).json({
+        error: missing
+          ? 'Onboarding progress was not saved. Run backend/migrations/064_onboarding_steps.sql in Supabase, then try again.'
+          : error.message,
+      });
+    }
+
+    if (notifyOnboardingReady) {
+      void notifyMentorStudentOnboardingReady(
+        req.user!.id,
+        onboardingStudentName || user?.name || 'Your student',
+      );
     }
 
     res.json(user);

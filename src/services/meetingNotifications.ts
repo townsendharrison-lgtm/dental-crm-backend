@@ -138,7 +138,7 @@ async function resolveRecipientIds(meeting: MeetingRow, excludeUserId?: string) 
   return Array.from(ids);
 }
 
-async function sendPushToUsers(
+export async function sendPushToUsers(
   userIds: string[],
   payload: {
     title: string;
@@ -147,6 +147,8 @@ async function sendPushToUsers(
     kind: string;
     /** Overrides the default schedule deep link. */
     linkPath?: string;
+    /** FCM data.type. Defaults to MEETING. */
+    dataType?: string;
   },
 ) {
   if (!messaging || userIds.length === 0) return;
@@ -189,7 +191,7 @@ async function sendPushToUsers(
           fcmOptions: { link },
         },
         data: {
-          type: 'MEETING',
+          type: payload.dataType || 'MEETING',
           meetingId: payload.meetingId,
           kind: payload.kind,
           link,

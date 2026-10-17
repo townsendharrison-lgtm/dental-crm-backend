@@ -211,6 +211,7 @@ router.post('/signin', async (req: Request, res: Response) => {
         avatar: profile?.avatar,
         timezone: profile?.timezone || undefined,
         onboardingCompletedAt: profile?.onboarding_completed_at || null,
+        onboardingStepIds: Array.isArray(profile?.onboarding_step_ids) ? profile.onboarding_step_ids : [],
       }
     });
   } catch (error) {
@@ -314,6 +315,7 @@ router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
       timezone: user.timezone || undefined,
       createdAt: user.created_at,
       onboardingCompletedAt: user.onboarding_completed_at || null,
+      onboardingStepIds: Array.isArray(user.onboarding_step_ids) ? user.onboarding_step_ids : [],
       weeklyLeadGoal: user.weekly_lead_goal,
       monthlyLeadGoal: user.monthly_lead_goal,
     });
