@@ -65,6 +65,53 @@ async function reloadMeeting(id: string) {
   return data;
 }
 
+/** Columns added in 066. A mentor can still finish a meeting before that SQL is applied. */
+const REVIEW_COLUMNS = new Set([
+  'official_summary',
+  'commitments_completed',
+  'incomplete_reason',
+  'incomplete_reason_detail',
+  'verified_summary',
+  'verified_school_timeline',
+  'ai_draft',
+]);
+
+function missingSchemaColumn(error: { message?: string; code?: string } | null): string | null {
+  const message = String(error?.message || '');
+  if (error?.code !== 'PGRST204' && !/schema cache/i.test(message)) return null;
+  const match = message.match(/'([^']+)' column/i);
+  return match?.[1] || null;
+}
+
+async function updateMeetingRow(id: string, dbUpdates: Record<string, unknown>) {
+  const payload = { ...dbUpdates };
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const { data, error } = await supabaseAdmin
+      .from('meetings')
+      .update(payload)
+      .eq('id', id)
+      .select()
+      .single();
+    if (!error) return { data, error: null };
+    const column = missingSchemaColumn(error);
+    if (!column || !REVIEW_COLUMNS.has(column) || !(column in payload)) {
+      return { data: null, error };
+    }
+    console.warn(
+      `Meeting ${id} saved without ${column}. Run backend/migrations/066_meeting_completion_review.sql in Supabase.`,
+    );
+    if (column === 'official_summary' && payload.official_summary) {
+      const record = `Official meeting record:\n${String(payload.official_summary)}`;
+      const notes = String(payload.mentor_notes || '');
+      if (!notes.includes(record)) {
+        payload.mentor_notes = notes ? `${notes}\n\n${record}` : record;
+      }
+    }
+    delete payload[column];
+  }
+  return { data: null, error: { message: 'Could not update meeting' } };
+}
+
 // ─── GET /api/meetings/google-meet/status ─────────────────────────────
 // Admin health check for the DSG Google Workspace integration.
 router.get('/google-meet/status', async (req: AuthRequest, res: Response) => {
@@ -674,14 +721,11 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    const { data: updatedRow, error } = await supabaseAdmin
-      .from('meetings')
-      .update(dbUpdates)
-      .eq('id', id)
-      .select()
-      .single();
+    const { data: updatedRow, error } = await updateMeetingRow(id, dbUpdates);
 
-    if (error) return res.status(500).json({ error: error.message });
+    if (error || !updatedRow) {
+      return res.status(500).json({ error: error?.message || 'Could not update meeting' });
+    }
 
     let updated = updatedRow;
     if (role !== 'STUDENT' && !updatedRow.completed) {

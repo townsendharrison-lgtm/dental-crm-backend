@@ -21,6 +21,7 @@ import {
   type MeetArtifact,
 } from './meetClient.js';
 import { parseMeetingNotes } from './meetingNotesAi.js';
+import { extractGeminiFullNotes } from './geminiFullNotes.js';
 import { sendMeetingGuestEmail, type MeetingInviteKind } from './meetingInviteEmail.js';
 
 const AUTO_MEET_AUDIENCES = new Set(['STUDENT', 'ADMIN_DIRECT', 'STAFF']);
@@ -433,6 +434,21 @@ async function shareNoteDocs(ids: Array<string | null | undefined>) {
   }
 }
 
+async function studentNameFor(meetingId: string): Promise<string> {
+  const { data: meeting } = await supabaseAdmin
+    .from('meetings')
+    .select('student_id')
+    .eq('id', meetingId)
+    .maybeSingle();
+  if (!meeting?.student_id) return '';
+  const { data: student } = await supabaseAdmin
+    .from('users')
+    .select('name')
+    .eq('id', meeting.student_id)
+    .maybeSingle();
+  return String(student?.name || '');
+}
+
 /** Save the review draft. Student tasks are created only when the mentor submits the form. */
 async function storeNotesDraft(
   meetingId: string,
@@ -444,10 +460,40 @@ async function storeNotesDraft(
   await shareNoteDocs(docIds);
   if (!text.trim()) return;
   try {
+    const studentName = await studentNameFor(meetingId);
+    const copied = extractGeminiFullNotes(text, studentName);
     const typeLabels = await loadMeetingTypeLabels();
-    const draft = await parseMeetingNotes(text, source, { typeLabels, meetingDate });
+    let nextMeeting = null;
+    let aiSummary = '';
+    let aiStudent: Array<{ task: string; dueInDays: number; priority: 'HIGH' | 'MEDIUM' | 'LOW' }> = [];
+    let aiMentor: string[] = [];
+    try {
+      const parsed = await parseMeetingNotes(text, source, { typeLabels, meetingDate });
+      nextMeeting = parsed.nextMeeting;
+      aiSummary = parsed.summary;
+      aiStudent = parsed.studentActionItems;
+      aiMentor = parsed.mentorActionItems;
+    } catch (err) {
+      console.error(`Meeting notes AI parse failed for meeting ${meetingId}:`, err);
+    }
+
+    const useCopied = copied.hasSummary || copied.hasNextSteps;
+    const draft = {
+      summary: copied.hasSummary ? copied.summary : aiSummary,
+      studentActionItems: copied.hasNextSteps
+        ? copied.studentActionItems.map((task) => ({ task, dueInDays: 7, priority: 'MEDIUM' as const }))
+        : aiStudent,
+      mentorActionItems: copied.hasNextSteps ? copied.mentorActionItems : aiMentor,
+      nextMeeting,
+    };
+    if (!draft.summary && draft.studentActionItems.length === 0 && draft.mentorActionItems.length === 0) {
+      return;
+    }
     const { error } = await supabaseAdmin.from('meetings').update({ ai_draft: draft }).eq('id', meetingId);
     if (error) throw new Error(error.message);
+    if (!useCopied) {
+      console.log(`Meeting ${meetingId} notes had no Summary/Next steps headings; used the AI draft.`);
+    }
   } catch (err) {
     console.error(`Meeting notes parse failed for meeting ${meetingId}:`, err);
     await supabaseAdmin.from('meetings').update({ meet_error: errText(err) }).eq('id', meetingId);
