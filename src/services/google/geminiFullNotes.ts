@@ -60,9 +60,8 @@ function parseNextSteps(block: string, studentName: string): { student: string[]
     if (!current) return;
     const text = current.text.replace(/\s+/g, " ").trim();
     if (text) {
-      const line = `[${current.owner}] ${text}`;
-      if (isStudentOwner(current.owner, studentName)) student.push(line);
-      else mentor.push(line);
+      if (isStudentOwner(current.owner, studentName)) student.push(text);
+      else mentor.push(text);
     }
     current = null;
   };

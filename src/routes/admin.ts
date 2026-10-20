@@ -6,6 +6,11 @@ import { VALID_ROLES } from '../types/index.js';
 import type { UserRole } from '../types/index.js';
 import { buildPlatformAnalytics } from '../services/platformAnalytics.js';
 import { sendInvitationEmail } from '../services/inviteEmailService.js';
+import {
+  buildSafeInviteUrl,
+  formatInviteLifetime,
+  inviteExpiresAt,
+} from '../services/inviteLink.js';
 
 const router = Router();
 
@@ -72,6 +77,69 @@ router.get('/analytics', authorize('ADMIN', 'MENTOR_MANAGER'), async (_req: Auth
 // Remaining admin routes are ADMIN-only
 router.use(authorize('ADMIN'));
 
+/**
+ * Create exactly one Supabase invite token.
+ * Calling generateLink or inviteUserByEmail again replaces that token, so a link
+ * that was just emailed starts failing with "expired".
+ */
+function readHashedToken(properties?: { hashed_token?: string; action_link?: string } | null): string {
+  if (properties?.hashed_token) return properties.hashed_token;
+  const link = properties?.action_link;
+  if (!link) return '';
+  try {
+    return new URL(link).searchParams.get('token') || '';
+  } catch {
+    return '';
+  }
+}
+
+async function issueInviteToken(
+  email: string,
+  role: string,
+  inviterName: string,
+  redirectUrl: string,
+): Promise<{ hashedToken: string; type: string; authUserId?: string } | { error: string }> {
+  const data = {
+    role,
+    name: '',
+    invited_by_name: inviterName,
+  };
+
+  const inviteResult = await supabaseAdmin.auth.admin.generateLink({
+    type: 'invite',
+    email,
+    options: { data, redirectTo: redirectUrl },
+  });
+
+  const inviteToken = readHashedToken(inviteResult.data?.properties);
+  if (inviteToken) {
+    return {
+      hashedToken: inviteToken,
+      type: inviteResult.data?.properties?.verification_type || 'invite',
+      authUserId: inviteResult.data?.user?.id,
+    };
+  }
+
+  // Invite fails once the auth user already exists (a previous invite). One magic link only.
+  const magicResult = await supabaseAdmin.auth.admin.generateLink({
+    type: 'magiclink',
+    email,
+    options: { data, redirectTo: redirectUrl },
+  });
+  const magicToken = readHashedToken(magicResult.data?.properties);
+  if (magicToken) {
+    return {
+      hashedToken: magicToken,
+      type: magicResult.data?.properties?.verification_type || 'magiclink',
+      authUserId: magicResult.data?.user?.id,
+    };
+  }
+
+  return {
+    error: inviteResult.error?.message || magicResult.error?.message || 'Could not create an invitation link',
+  };
+}
+
 // Invite user using Supabase built-in invite
 router.post('/invite', async (req: AuthRequest, res: Response) => {
   try {
@@ -115,78 +183,31 @@ router.post('/invite', async (req: AuthRequest, res: Response) => {
     const inviterName = inviter?.name || 'Admin';
     const redirectUrl = `${frontendUrl}/complete-invitation`;
 
-    // 1. Generate canonical invite link with user metadata & clean Next.js redirect URL
-    const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
-      type: 'invite',
-      email,
-      options: {
-        data: {
-          role,
-          name: '',
-          invited_by_name: inviterName,
-        },
-        redirectTo: redirectUrl,
-      },
-    });
-
-    let invitationLink = '';
-    let authUserId = uuidv4();
-    let emailSent = false;
-
-    if (linkData?.properties?.action_link) {
-      invitationLink = linkData.properties.action_link;
-      authUserId = linkData.user?.id || authUserId;
-
-      // 2. Dispatch branded email via Resend containing the exact valid action link
-      const emailResult = await sendInvitationEmail({
-        email,
-        role,
-        inviterName,
-        actionLink: invitationLink,
-      });
-
-      if (emailResult.success) {
-        emailSent = true;
-      } else {
-        console.warn(`Resend email delivery skipped/failed (${emailResult.error}), falling back to Supabase email`);
-        // Fallback: inviteUserByEmail if Resend is unavailable
-        const { error: fallbackError } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
-          data: {
-            role,
-            name: '',
-            invited_by_name: inviterName,
-          },
-          redirectTo: redirectUrl,
-        });
-        if (!fallbackError) {
-          emailSent = true;
-        } else {
-          console.error('Supabase fallback invite error:', fallbackError.message);
-        }
-      }
-    } else {
-      console.warn('generateLink did not return action_link, trying inviteUserByEmail directly:', linkError?.message);
-      // Fallback: call inviteUserByEmail directly
-      const { data: inviteData, error: inviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
-        data: {
-          role,
-          name: '',
-          invited_by_name: inviterName,
-        },
-        redirectTo: redirectUrl,
-      });
-
-      if (inviteError) {
-        return res.status(400).json({ error: inviteError.message });
-      }
-
-      authUserId = inviteData.user?.id || authUserId;
-      emailSent = true;
+    // One generateLink call. A second invite/magic-link call replaces the token and
+    // makes the email we just sent look expired immediately.
+    const issued = await issueInviteToken(email, role, inviterName, redirectUrl);
+    if ('error' in issued) {
+      return res.status(400).json({ error: issued.error });
     }
 
-    // 3. Track the invitation in our table for admin visibility (valid for 2 hours)
-    const expiresAt = new Date();
-    expiresAt.setHours(expiresAt.getHours() + 2);
+    const invitationLink = buildSafeInviteUrl(frontendUrl, issued.hashedToken, issued.type);
+    const authUserId = issued.authUserId || uuidv4();
+    const expiresInLabel = formatInviteLifetime();
+
+    const emailResult = await sendInvitationEmail({
+      email,
+      role,
+      inviterName,
+      actionLink: invitationLink,
+      expiresInLabel,
+    });
+    const emailSent = emailResult.success;
+    if (!emailResult.success) {
+      console.warn(`Resend email delivery skipped/failed (${emailResult.error}). Link was not rotated.`);
+    }
+
+    // Track the invitation for the same lifetime as Supabase's email OTP expiration.
+    const expiresAt = inviteExpiresAt();
 
     const { data: invitation, error: trackError } = await supabaseAdmin
       .from('invitations')
@@ -246,73 +267,26 @@ router.post('/invitations/:id/resend', async (req: AuthRequest, res: Response) =
     const inviterName = invitation.invited_by_name || 'Admin';
     const redirectUrl = `${frontendUrl}/complete-invitation`;
 
-    // 1. Try generating fresh canonical invite link
-    let newLink = '';
-    let linkDataResult = await supabaseAdmin.auth.admin.generateLink({
-      type: 'invite',
+    const issued = await issueInviteToken(invitation.email, invitation.role, inviterName, redirectUrl);
+    if ('error' in issued) {
+      return res.status(400).json({ error: issued.error });
+    }
+
+    const newLink = buildSafeInviteUrl(frontendUrl, issued.hashedToken, issued.type);
+    const expiresInLabel = formatInviteLifetime();
+    const emailResult = await sendInvitationEmail({
       email: invitation.email,
-      options: {
-        data: {
-          role: invitation.role,
-          name: '',
-          invited_by_name: inviterName,
-        },
-        redirectTo: redirectUrl,
-      },
+      role: invitation.role,
+      inviterName,
+      actionLink: newLink,
+      expiresInLabel,
     });
-
-    if (linkDataResult.data?.properties?.action_link) {
-      newLink = linkDataResult.data.properties.action_link;
-    } else {
-      // If user was already created in auth.users, generate a magiclink directly
-      const magicResult = await supabaseAdmin.auth.admin.generateLink({
-        type: 'magiclink',
-        email: invitation.email,
-        options: {
-          redirectTo: redirectUrl,
-        },
-      });
-      if (magicResult.data?.properties?.action_link) {
-        newLink = magicResult.data.properties.action_link;
-      }
+    const emailSent = emailResult.success;
+    if (!emailResult.success) {
+      console.warn(`Resend email failed (${emailResult.error}). Link was not rotated.`);
     }
 
-    let emailSent = false;
-    if (newLink) {
-      const emailResult = await sendInvitationEmail({
-        email: invitation.email,
-        role: invitation.role,
-        inviterName,
-        actionLink: newLink,
-      });
-      if (emailResult.success) {
-        emailSent = true;
-      } else {
-        console.warn(`Resend failed during resend (${emailResult.error}), trying Supabase email fallback`);
-      }
-    }
-
-    // 2. Fallback to Supabase email if Resend didn't send
-    if (!emailSent) {
-      const { error: reinviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(invitation.email, {
-        data: {
-          role: invitation.role,
-          name: '',
-          invited_by_name: inviterName,
-        },
-        redirectTo: redirectUrl,
-      });
-
-      if (reinviteError) {
-        console.error('Supabase reinvite fallback error:', reinviteError.message);
-        return res.status(400).json({ error: reinviteError.message });
-      }
-      emailSent = true;
-    }
-
-    // 3. Extend expiration by 2 hours and ensure status is PENDING
-    const expiresAt = new Date();
-    expiresAt.setHours(expiresAt.getHours() + 2);
+    const expiresAt = inviteExpiresAt();
     await supabaseAdmin
       .from('invitations')
       .update({

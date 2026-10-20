@@ -17,6 +17,8 @@ interface SendInviteEmailParams {
   role: string;
   inviterName: string;
   actionLink: string;
+  /** Human lifetime, matching the Supabase email OTP expiration. */
+  expiresInLabel?: string;
 }
 
 export async function sendInvitationEmail({
@@ -24,6 +26,7 @@ export async function sendInvitationEmail({
   role,
   inviterName,
   actionLink,
+  expiresInLabel = '24 hours',
 }: SendInviteEmailParams): Promise<{ success: boolean; error?: string }> {
   if (!resend) {
     console.warn('⚠️ Resend is not configured (RESEND_API_KEY missing) — cannot send invite via Resend');
@@ -154,7 +157,7 @@ export async function sendInvitationEmail({
 
               <!-- Expiry Notice -->
               <p style="color: #64748b !important; font-size: 13px; line-height: 1.6; margin: 24px 0 0 0;">
-                This invitation link will expire in 2 hours. If you didn't expect this email, you can safely ignore it.
+                This invitation link expires in ${expiresInLabel}, the same window as the sign-in links in Supabase. If you didn't expect this email, you can safely ignore it.
               </p>
             </td>
           </tr>
@@ -191,7 +194,7 @@ You have been invited${inviterText} to join Dental School Guide as a ${roleLabel
 Click the link below to choose your password and activate your account:
 ${actionLink}
 
-This invitation link will expire in 2 hours. If you did not expect this email, you can safely ignore it.
+This invitation link expires in ${expiresInLabel}, the same window as the sign-in links in Supabase. If you did not expect this email, you can safely ignore it.
 
 © ${new Date().getFullYear()} Dental School Guide. All rights reserved.
 `.trim();
