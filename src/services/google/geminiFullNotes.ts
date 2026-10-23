@@ -33,7 +33,8 @@ export interface ExtractNotesOptions {
 type SectionName = "summary" | "decisions" | "next" | "details" | "transcript";
 type Owner = "student" | "mentor" | "unassigned";
 
-const BOILERPLATE = /you should review gemini|how is the quality of these specific notes|get tips and learn how gemini takes notes|take a short survey/i;
+const BOILERPLATE =
+  /you should review gemini|how is the quality of these specific notes|get tips and learn how gemini takes notes|take a short survey|want to see more\??|view the (?:full )?notes|please rate the new|quick notes tab/i;
 const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
 const MONTHS: Record<string, number> = {
   jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3, apr: 4, april: 4,
@@ -74,7 +75,10 @@ function namesMatch(owner: string, person: string): boolean {
 function isDocChrome(line: string): boolean {
   const cleaned = line.replace(/^[^a-zA-Z0-9]+/, "").trim();
   if (!cleaned || BOILERPLATE.test(cleaned)) return true;
-  if (/^(full notes|meeting records?|transcript|meeting|notes|gemini notes)$/i.test(cleaned)) return true;
+  if (/^want to see more/i.test(cleaned)) return true;
+  if (/^(full notes|meeting records?|transcript|meeting|notes|gemini notes|quick notes)$/i.test(cleaned)) {
+    return true;
+  }
   if (/^(?:meeting\s+)?[A-Z][a-z]+\s+\d{1,2},\s+\d{4}(?:\s+at\s+\d{1,2}:\d{2}(?:\s*[AP]M)?(?:\s*[A-Z]{2,5})?)?$/i.test(cleaned)) {
     return true;
   }
@@ -82,8 +86,13 @@ function isDocChrome(line: string): boolean {
 }
 
 function cleanTask(text: string): string {
-  const cut = text.split(/📝|\bFull notes\b|\bMeeting records\b/i)[0] || "";
-  const cleaned = cut.replace(/\s+/g, " ").trim();
+  const cut = text.split(
+    /📝|\bFull notes\b|\bMeeting records\b|\bWant to see more\b|\bView the\b/i,
+  )[0] || "";
+  const cleaned = cut
+    .replace(/\bWant to see more\??\s*(?:View the)?\b.*/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
   if (!cleaned || isDocChrome(cleaned)) return "";
   return cleaned;
 }
