@@ -17,6 +17,7 @@ export interface ParsedMeetingNotes {
   summary: string;
   studentActionItems: ParsedStudentAction[];
   mentorActionItems: string[];
+  unassignedActionItems: string[];
   nextMeeting: ParsedNextMeeting | null;
 }
 
@@ -61,6 +62,7 @@ export async function parseMeetingNotes(
     summary: '',
     studentActionItems: [],
     mentorActionItems: [],
+    unassignedActionItems: [],
     nextMeeting: null,
   };
   const body = text.trim().slice(0, MAX_INPUT_CHARS);
@@ -90,13 +92,16 @@ export async function parseMeetingNotes(
               (meetingDate ? `The meeting took place on ${meetingDate}.\n` : '') +
               (labels.length ? `Known session type names: ${labels.join(', ')}.\n` : '') +
               'Write a concise official summary (max ~200 words) a mentor can review and edit. ' +
-              'List concrete next steps the STUDENT agreed to do, and separately the next steps the MENTOR agreed to do. ' +
+              'Put a next step in studentActionItems only when the student agreed to do it, or the mentor clearly told the student to do it. ' +
+              'Put it in mentorActionItems only when the mentor agreed to do it themselves, such as sending a resource. ' +
+              'If the transcript does not make the owner clear, put the step in unassignedActionItems. Do not guess. ' +
+              'Do not include document headers such as Full notes, Meeting records, Transcript, or the meeting date stamp. ' +
               'If they agreed on a future meeting, set nextMeeting.mentioned to true. ' +
               'typeName should be the closest known session type, or a short custom name when none fits. ' +
               'date is YYYY-MM-DD only when a calendar date was stated or can be resolved from the meeting date (for example "next Thursday"). ' +
               'time is 24-hour HH:mm only when a clock time was stated. ' +
-              'Leave date and time empty when they were not said. ' +
-              'If no next meeting was discussed, set mentioned to false. ' +
+              'Leave date and time as empty strings when they were not said. Do not invent a time. ' +
+              'If no next meeting was discussed, set mentioned to false and leave date and time empty. ' +
               'dueInDays is your best estimate from the conversation (default 7). ' +
               'Do not invent anything the text does not support.\n\n' +
               body,
@@ -124,6 +129,7 @@ export async function parseMeetingNotes(
             },
           },
           mentorActionItems: { type: Type.ARRAY, items: { type: Type.STRING } },
+          unassignedActionItems: { type: Type.ARRAY, items: { type: Type.STRING } },
           nextMeeting: {
             type: Type.OBJECT,
             properties: {
@@ -135,7 +141,7 @@ export async function parseMeetingNotes(
             required: ['mentioned'],
           },
         },
-        required: ['summary', 'studentActionItems', 'mentorActionItems'],
+        required: ['summary', 'studentActionItems', 'mentorActionItems', 'unassignedActionItems'],
       },
     },
   });
@@ -143,6 +149,7 @@ export async function parseMeetingNotes(
   const parsed = JSON.parse(response.text || '{}');
   const items = Array.isArray(parsed.studentActionItems) ? parsed.studentActionItems : [];
   const mentorItems = Array.isArray(parsed.mentorActionItems) ? parsed.mentorActionItems : [];
+  const unassignedItems = Array.isArray(parsed.unassignedActionItems) ? parsed.unassignedActionItems : [];
   const next = parsed.nextMeeting;
   const mentioned = !!next?.mentioned;
   return {
@@ -156,6 +163,10 @@ export async function parseMeetingNotes(
         priority: ['HIGH', 'MEDIUM', 'LOW'].includes(item.priority) ? item.priority : 'MEDIUM',
       })),
     mentorActionItems: mentorItems
+      .map((item: unknown) => String(item || '').trim())
+      .filter(Boolean)
+      .slice(0, 15),
+    unassignedActionItems: unassignedItems
       .map((item: unknown) => String(item || '').trim())
       .filter(Boolean)
       .slice(0, 15),

@@ -31,13 +31,12 @@ export function formatInviteLifetime(seconds = supabaseOtpExpSeconds()): string 
 }
 
 /**
- * Link to our own page. The Supabase verify URL is one-time and gets used up
- * when an inbox scanner opens it. This URL does nothing until the person clicks
- * Continue, which is when we redeem the token.
+ * Our own invitation link. Opening it only shows the name and password form.
+ * The token is checked when that form is submitted, so an inbox scanner
+ * cannot use it up the way a Supabase verify URL can.
  */
-export function buildSafeInviteUrl(frontendUrl: string, hashedToken: string, type: string): string {
+export function buildAppInviteUrl(frontendUrl: string, token: string): string {
   const url = new URL('/complete-invitation', frontendUrl.endsWith('/') ? frontendUrl : `${frontendUrl}/`);
-  url.searchParams.set('token_hash', hashedToken);
-  url.searchParams.set('type', type || 'invite');
+  url.searchParams.set('token', token);
   return url.toString();
 }

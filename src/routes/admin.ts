@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import { randomBytes } from 'crypto';
 import { supabaseAdmin } from '../config/supabase.js';
 import { v4 as uuidv4 } from 'uuid';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth.js';
@@ -7,7 +8,7 @@ import type { UserRole } from '../types/index.js';
 import { buildPlatformAnalytics } from '../services/platformAnalytics.js';
 import { sendInvitationEmail } from '../services/inviteEmailService.js';
 import {
-  buildSafeInviteUrl,
+  buildAppInviteUrl,
   formatInviteLifetime,
   inviteExpiresAt,
 } from '../services/inviteLink.js';
@@ -77,67 +78,63 @@ router.get('/analytics', authorize('ADMIN', 'MENTOR_MANAGER'), async (_req: Auth
 // Remaining admin routes are ADMIN-only
 router.use(authorize('ADMIN'));
 
-/**
- * Create exactly one Supabase invite token.
- * Calling generateLink or inviteUserByEmail again replaces that token, so a link
- * that was just emailed starts failing with "expired".
- */
-function readHashedToken(properties?: { hashed_token?: string; action_link?: string } | null): string {
-  if (properties?.hashed_token) return properties.hashed_token;
-  const link = properties?.action_link;
-  if (!link) return '';
-  try {
-    return new URL(link).searchParams.get('token') || '';
-  } catch {
-    return '';
+async function findAuthUserIdByEmail(email: string): Promise<string | null> {
+  const url = `${process.env.SUPABASE_URL}/auth/v1/admin/users?filter=${encodeURIComponent(email)}`;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${key}`, apikey: key },
+  });
+  const target = email.toLowerCase();
+  if (response.ok) {
+    const body = (await response.json()) as { users?: { id: string; email?: string }[] };
+    const match = body.users?.find((user) => user.email?.toLowerCase() === target);
+    if (match) return match.id;
   }
+
+  for (let page = 1; page <= 5; page += 1) {
+    const { data, error } = await supabaseAdmin.auth.admin.listUsers({ page, perPage: 200 });
+    if (error || !data?.users?.length) return null;
+    const match = data.users.find((user) => user.email?.toLowerCase() === target);
+    if (match) return match.id;
+    if (data.users.length < 200) return null;
+  }
+  return null;
 }
 
-async function issueInviteToken(
+/**
+ * Create the auth account once. The emailed link is our own token, not Supabase's
+ * one-time verify URL, so opening the email cannot mark it expired.
+ */
+async function ensureInvitedAuthUser(
   email: string,
   role: string,
   inviterName: string,
-  redirectUrl: string,
-): Promise<{ hashedToken: string; type: string; authUserId?: string } | { error: string }> {
-  const data = {
-    role,
-    name: '',
-    invited_by_name: inviterName,
-  };
-
-  const inviteResult = await supabaseAdmin.auth.admin.generateLink({
-    type: 'invite',
+): Promise<{ authUserId: string } | { error: string }> {
+  const user_metadata = { role, name: '', invited_by_name: inviterName };
+  const created = await supabaseAdmin.auth.admin.createUser({
     email,
-    options: { data, redirectTo: redirectUrl },
+    password: randomBytes(32).toString('base64url'),
+    email_confirm: true,
+    user_metadata,
   });
+  if (created.data.user?.id) return { authUserId: created.data.user.id };
 
-  const inviteToken = readHashedToken(inviteResult.data?.properties);
-  if (inviteToken) {
-    return {
-      hashedToken: inviteToken,
-      type: inviteResult.data?.properties?.verification_type || 'invite',
-      authUserId: inviteResult.data?.user?.id,
-    };
+  const message = created.error?.message || '';
+  if (!/already|registered|exists/i.test(message)) {
+    return { error: message || 'Could not create the account' };
   }
 
-  // Invite fails once the auth user already exists (a previous invite). One magic link only.
-  const magicResult = await supabaseAdmin.auth.admin.generateLink({
-    type: 'magiclink',
-    email,
-    options: { data, redirectTo: redirectUrl },
+  const authUserId = await findAuthUserIdByEmail(email);
+  if (!authUserId) return { error: message || 'Could not create the account' };
+  await supabaseAdmin.auth.admin.updateUserById(authUserId, {
+    email_confirm: true,
+    user_metadata,
   });
-  const magicToken = readHashedToken(magicResult.data?.properties);
-  if (magicToken) {
-    return {
-      hashedToken: magicToken,
-      type: magicResult.data?.properties?.verification_type || 'magiclink',
-      authUserId: magicResult.data?.user?.id,
-    };
-  }
+  return { authUserId };
+}
 
-  return {
-    error: inviteResult.error?.message || magicResult.error?.message || 'Could not create an invitation link',
-  };
+function newInviteToken(authUserId: string): string {
+  return `${authUserId}.${randomBytes(32).toString('hex')}`;
 }
 
 // Invite user using Supabase built-in invite
@@ -181,17 +178,14 @@ router.post('/invite', async (req: AuthRequest, res: Response) => {
 
     const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
     const inviterName = inviter?.name || 'Admin';
-    const redirectUrl = `${frontendUrl}/complete-invitation`;
 
-    // One generateLink call. A second invite/magic-link call replaces the token and
-    // makes the email we just sent look expired immediately.
-    const issued = await issueInviteToken(email, role, inviterName, redirectUrl);
+    const issued = await ensureInvitedAuthUser(email, role, inviterName);
     if ('error' in issued) {
       return res.status(400).json({ error: issued.error });
     }
 
-    const invitationLink = buildSafeInviteUrl(frontendUrl, issued.hashedToken, issued.type);
-    const authUserId = issued.authUserId || uuidv4();
+    const invitationToken = newInviteToken(issued.authUserId);
+    const invitationLink = buildAppInviteUrl(frontendUrl, invitationToken);
     const expiresInLabel = formatInviteLifetime();
 
     const emailResult = await sendInvitationEmail({
@@ -215,7 +209,7 @@ router.post('/invite', async (req: AuthRequest, res: Response) => {
         id: uuidv4(),
         email,
         role,
-        token: authUserId,
+        token: invitationToken,
         invited_by: req.user!.id,
         invited_by_name: inviterName,
         status: 'PENDING',
@@ -265,14 +259,14 @@ router.post('/invitations/:id/resend', async (req: AuthRequest, res: Response) =
 
     const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
     const inviterName = invitation.invited_by_name || 'Admin';
-    const redirectUrl = `${frontendUrl}/complete-invitation`;
 
-    const issued = await issueInviteToken(invitation.email, invitation.role, inviterName, redirectUrl);
+    const issued = await ensureInvitedAuthUser(invitation.email, invitation.role, inviterName);
     if ('error' in issued) {
       return res.status(400).json({ error: issued.error });
     }
 
-    const newLink = buildSafeInviteUrl(frontendUrl, issued.hashedToken, issued.type);
+    const invitationToken = newInviteToken(issued.authUserId);
+    const newLink = buildAppInviteUrl(frontendUrl, invitationToken);
     const expiresInLabel = formatInviteLifetime();
     const emailResult = await sendInvitationEmail({
       email: invitation.email,
@@ -290,6 +284,7 @@ router.post('/invitations/:id/resend', async (req: AuthRequest, res: Response) =
     await supabaseAdmin
       .from('invitations')
       .update({
+        token: invitationToken,
         status: 'PENDING',
         expires_at: expiresAt.toISOString(),
         created_at: new Date().toISOString(),

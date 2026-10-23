@@ -434,6 +434,21 @@ async function shareNoteDocs(ids: Array<string | null | undefined>) {
   }
 }
 
+async function mentorNameFor(meetingId: string): Promise<string> {
+  const { data: meeting } = await supabaseAdmin
+    .from('meetings')
+    .select('mentor_id')
+    .eq('id', meetingId)
+    .maybeSingle();
+  if (!meeting?.mentor_id) return '';
+  const { data: mentor } = await supabaseAdmin
+    .from('users')
+    .select('name')
+    .eq('id', meeting.mentor_id)
+    .maybeSingle();
+  return String(mentor?.name || '');
+}
+
 async function studentNameFor(meetingId: string): Promise<string> {
   const { data: meeting } = await supabaseAdmin
     .from('meetings')
@@ -461,18 +476,24 @@ async function storeNotesDraft(
   if (!text.trim()) return;
   try {
     const studentName = await studentNameFor(meetingId);
-    const copied = extractGeminiFullNotes(text, studentName);
+    const mentorName = await mentorNameFor(meetingId);
+    const copied = extractGeminiFullNotes(text, studentName, {
+      mentorName,
+      meetingDate,
+    });
     const typeLabels = await loadMeetingTypeLabels();
     let nextMeeting = null;
     let aiSummary = '';
     let aiStudent: Array<{ task: string; dueInDays: number; priority: 'HIGH' | 'MEDIUM' | 'LOW' }> = [];
     let aiMentor: string[] = [];
+    let aiUnassigned: string[] = [];
     try {
       const parsed = await parseMeetingNotes(text, source, { typeLabels, meetingDate });
       nextMeeting = parsed.nextMeeting;
       aiSummary = parsed.summary;
       aiStudent = parsed.studentActionItems;
       aiMentor = parsed.mentorActionItems;
+      aiUnassigned = parsed.unassignedActionItems;
     } catch (err) {
       console.error(`Meeting notes AI parse failed for meeting ${meetingId}:`, err);
     }
@@ -481,12 +502,33 @@ async function storeNotesDraft(
     const draft = {
       summary: copied.hasSummary ? copied.summary : aiSummary,
       studentActionItems: copied.hasNextSteps
-        ? copied.studentActionItems.map((task) => ({ task, dueInDays: 7, priority: 'MEDIUM' as const }))
+        ? copied.studentActionItems.map((item) => ({
+            task: item.task,
+            dueDate: item.dueDate,
+            priority: 'MEDIUM' as const,
+          }))
         : aiStudent,
-      mentorActionItems: copied.hasNextSteps ? copied.mentorActionItems : aiMentor,
-      nextMeeting,
+      mentorActionItems: copied.hasNextSteps
+        ? copied.mentorActionItems.map((item) => item.task)
+        : aiMentor,
+      unassignedActionItems: copied.hasNextSteps
+        ? copied.unassignedActionItems.map((item) => item.task)
+        : aiUnassigned,
+      nextMeeting: copied.nextMeeting
+        ? {
+            mentioned: true,
+            typeName: nextMeeting?.typeName || '',
+            date: copied.nextMeeting.date,
+            time: copied.nextMeeting.time,
+          }
+        : null,
     };
-    if (!draft.summary && draft.studentActionItems.length === 0 && draft.mentorActionItems.length === 0) {
+    if (
+      !draft.summary &&
+      draft.studentActionItems.length === 0 &&
+      draft.mentorActionItems.length === 0 &&
+      draft.unassignedActionItems.length === 0
+    ) {
       return;
     }
     const { error } = await supabaseAdmin.from('meetings').update({ ai_draft: draft }).eq('id', meetingId);

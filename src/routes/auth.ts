@@ -5,25 +5,76 @@ import { SignInRequest, ResetPasswordRequest } from '../types/index.js';
 
 const router = Router();
 
-// Complete invitation — called after user clicks the Supabase invite email link
-// The user arrives at the frontend with an access_token and sets their name + password
+const INVITE_INVALID = 'This invitation link is no longer valid. Ask your administrator to resend it.';
+
+async function authUserFromInvitationToken(token: string) {
+  const { data: invitation, error } = await supabaseAdmin
+    .from('invitations')
+    .select('email, status, expires_at')
+    .eq('token', token)
+    .maybeSingle();
+
+  if (error || !invitation || invitation.status !== 'PENDING') return { error: INVITE_INVALID };
+  if (new Date(invitation.expires_at).getTime() < Date.now()) {
+    return { error: 'This invitation link has expired. Ask your administrator to resend it.' };
+  }
+
+  const authUserId = token.split('.')[0];
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(authUserId)) {
+    return { error: INVITE_INVALID };
+  }
+
+  const { data, error: userError } = await supabaseAdmin.auth.admin.getUserById(authUserId);
+  if (userError || !data.user || data.user.email?.toLowerCase() !== String(invitation.email).toLowerCase()) {
+    return { error: INVITE_INVALID };
+  }
+  return { user: data.user };
+}
+
+// Preview an invitation without using it up. Opening the page must not expire the link.
+router.get('/invitation', async (req: Request, res: Response) => {
+  try {
+    const token = String(req.query.token || '');
+    const loaded = await authUserFromInvitationToken(token);
+    if ('error' in loaded) return res.status(400).json({ error: loaded.error });
+
+    const metadata = loaded.user.user_metadata || {};
+    res.json({
+      email: loaded.user.email,
+      role: metadata.role || 'STUDENT',
+      invitedByName: metadata.invited_by_name || '',
+    });
+  } catch (error) {
+    console.error('Invitation preview error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Complete invitation — name and password form. Accepts our invitation token,
+// or a Supabase access token from an older redirect link.
 router.post('/complete-invitation', async (req: Request, res: Response) => {
   try {
-    const { accessToken, name, password } = req.body;
+    const { accessToken, invitationToken, name, password } = req.body;
 
-    if (!accessToken || !name || !password) {
-      return res.status(400).json({ error: 'Access token, name, and password are required' });
+    if ((!accessToken && !invitationToken) || !name || !password) {
+      return res.status(400).json({ error: 'Name and password are required' });
     }
 
     if (password.length < 8) {
       return res.status(400).json({ error: 'Password must be at least 8 characters' });
     }
 
-    // Verify the access token to identify the user
-    const { data: { user: authUser }, error: verifyError } = await supabase.auth.getUser(accessToken);
-
-    if (verifyError || !authUser) {
-      return res.status(400).json({ error: 'Invalid or expired invitation link. Please ask admin to resend the invite.' });
+    let authUser;
+    if (invitationToken) {
+      const loaded = await authUserFromInvitationToken(String(invitationToken));
+      if ('error' in loaded) return res.status(400).json({ error: loaded.error });
+      authUser = loaded.user;
+    } else {
+      const { data, error: verifyError } = await supabase.auth.getUser(accessToken);
+      authUser = data.user;
+      if (verifyError || !authUser) {
+        return res.status(400).json({ error: 'Invalid or expired invitation link. Please ask admin to resend the invite.' });
+      }
     }
 
     // Get the role from user_metadata (set during invite)
@@ -32,6 +83,7 @@ router.post('/complete-invitation', async (req: Request, res: Response) => {
     // Update the user's password and name in Supabase Auth
     const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(authUser.id, {
       password,
+      email_confirm: true,
       user_metadata: {
         ...authUser.user_metadata,
         name,
